@@ -1,0 +1,935 @@
+import google.generativeai as genai
+import os
+import asyncio
+import traceback
+from typing import Dict, Any, Optional, List
+from datetime import datetime, timezone
+import magic
+import PyPDF2
+from PIL import Image
+import io
+import base64
+import requests
+from pathlib import Path
+import tempfile
+import concurrent.futures
+
+class AIAnalysisService:
+    def __init__(self):
+        """Initialize the AI Analysis Service with Gemini 2.0 Flash"""
+        self.api_key = os.getenv("GEMINI_API_KEY")
+        if not self.api_key:
+            raise ValueError("GEMINI_API_KEY not found in environment variables")
+        
+        # Configure Gemini
+        genai.configure(api_key=self.api_key)
+        
+        # Initialize the model
+        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        
+        # Create thread pool for sync operations
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
+        
+        print("AI Analysis Service initialized with Gemini 2.0 Flash")
+    
+    async def analyze_document(
+        self, 
+        file_content: bytes, 
+        file_name: str, 
+        file_type: str,
+        patient_context: Dict[str, Any],
+        visit_context: Dict[str, Any],
+        doctor_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Analyze a medical document using Gemini 2.0 Flash with patient and visit context
+        
+        Args:
+            file_content: The binary content of the file
+            file_name: Name of the file
+            file_type: MIME type of the file
+            patient_context: Patient information (name, age, medical history, etc.)
+            visit_context: Visit information (complaints, symptoms, recommended tests, etc.)
+            doctor_context: Doctor information (name, specialization, etc.)
+        
+        Returns:
+            Dict containing analysis results
+        """
+        try:
+            print(f"Starting AI analysis for file: {file_name}")
+            
+            # Prepare the document for analysis
+            document_data = await self._prepare_document(file_content, file_name, file_type)
+            if not document_data:
+                return {
+                    "success": False,
+                    "error": "Unable to process document format",
+                    "analysis": None
+                }
+            
+            # Create context-aware prompt
+            prompt = self._create_analysis_prompt(
+                patient_context, 
+                visit_context, 
+                doctor_context, 
+                file_name
+            )
+            
+            # Perform AI analysis
+            analysis_result = await self._perform_gemini_analysis(prompt, document_data)
+            
+            return {
+                "success": True,
+                "analysis": analysis_result,
+                "processed_at": datetime.now(timezone.utc).isoformat(),
+                "model_used": "gemini-2.0-flash-exp"
+            }
+            
+        except Exception as e:
+            print(f"Error in AI document analysis: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return {
+                "success": False,
+                "error": str(e),
+                "analysis": None
+            }
+    
+    async def _prepare_document(
+        self, 
+        file_content: bytes, 
+        file_name: str, 
+        file_type: str
+    ) -> Optional[Dict[str, Any]]:
+        """Prepare document content for AI analysis"""
+        try:
+            # Handle different file types
+            if file_type.startswith('image/'):
+                return await self._prepare_image(file_content, file_type)
+            elif file_type == 'application/pdf':
+                return await self._prepare_pdf(file_content)
+            elif file_type.startswith('text/'):
+                return await self._prepare_text(file_content)
+            else:
+                # Try to detect file type if not recognized
+                detected_type = magic.from_buffer(file_content, mime=True)
+                if detected_type.startswith('image/'):
+                    return await self._prepare_image(file_content, detected_type)
+                elif detected_type == 'application/pdf':
+                    return await self._prepare_pdf(file_content)
+                else:
+                    print(f"Unsupported file type: {file_type} (detected: {detected_type})")
+                    return None
+                    
+        except Exception as e:
+            print(f"Error preparing document: {e}")
+            return None
+    
+    async def _prepare_image(self, file_content: bytes, file_type: str) -> Dict[str, Any]:
+        """Prepare image for AI analysis"""
+        try:
+            # Convert to PIL Image
+            image = Image.open(io.BytesIO(file_content))
+            
+            # Convert to RGB if necessary
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            
+            # Resize if too large (Gemini has size limits)
+            max_size = (1024, 1024)
+            if image.size[0] > max_size[0] or image.size[1] > max_size[1]:
+                image.thumbnail(max_size, Image.Resampling.LANCZOS)
+            
+            # Convert back to bytes
+            output = io.BytesIO()
+            image.save(output, format='JPEG', quality=85)
+            processed_content = output.getvalue()
+            
+            return {
+                "type": "image",
+                "content": processed_content,
+                "mime_type": "image/jpeg"
+            }
+            
+        except Exception as e:
+            print(f"Error preparing image: {e}")
+            return None
+    
+    async def _prepare_pdf(self, file_content: bytes) -> Dict[str, Any]:
+        """Prepare PDF for AI analysis"""
+        try:
+            # Extract text from PDF
+            pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_content))
+            text_content = ""
+            
+            for page in pdf_reader.pages:
+                text_content += page.extract_text() + "\n"
+            
+            # If text extraction is successful, use text
+            if text_content.strip():
+                return {
+                    "type": "text",
+                    "content": text_content.strip()
+                }
+            else:
+                # If no text, try to convert first page to image
+                # Note: This would require additional libraries like pdf2image
+                # For now, return the raw content and let Gemini handle it
+                return {
+                    "type": "pdf",
+                    "content": file_content[:1024000],  # Limit size
+                    "mime_type": "application/pdf"
+                }
+                
+        except Exception as e:
+            print(f"Error preparing PDF: {e}")
+            return None
+    
+    async def _prepare_text(self, file_content: bytes) -> Dict[str, Any]:
+        """Prepare text file for AI analysis"""
+        try:
+            text_content = file_content.decode('utf-8')
+            return {
+                "type": "text",
+                "content": text_content
+            }
+        except UnicodeDecodeError:
+            try:
+                text_content = file_content.decode('latin-1')
+                return {
+                    "type": "text",
+                    "content": text_content
+                }
+            except Exception as e:
+                print(f"Error decoding text: {e}")
+                return None
+    
+    def _create_analysis_prompt(
+        self, 
+        patient_context: Dict[str, Any], 
+        visit_context: Dict[str, Any], 
+        doctor_context: Dict[str, Any], 
+        file_name: str
+    ) -> str:
+        """Create a comprehensive analysis prompt with context"""
+        
+        # Extract patient information
+        patient_name = f"{patient_context.get('first_name', '')} {patient_context.get('last_name', '')}"
+        patient_age = self._calculate_age(patient_context.get('date_of_birth', ''))
+        patient_gender = patient_context.get('gender', 'Not specified')
+        medical_history = patient_context.get('medical_history', 'None provided')
+        allergies = patient_context.get('allergies', 'None known')
+        blood_group = patient_context.get('blood_group', 'Not specified')
+        
+        # Extract visit information
+        visit_date = visit_context.get('visit_date', 'Not specified')
+        chief_complaint = visit_context.get('chief_complaint', 'Not specified')
+        symptoms = visit_context.get('symptoms', 'None specified')
+        tests_recommended = visit_context.get('tests_recommended', 'General tests')
+        diagnosis = visit_context.get('diagnosis', 'Pending')
+        clinical_examination = visit_context.get('clinical_examination', 'Not documented')
+        
+        # Extract doctor information
+        doctor_name = f"Dr. {doctor_context.get('first_name', '')} {doctor_context.get('last_name', '')}"
+        specialization = doctor_context.get('specialization', 'General Medicine')
+        
+        prompt = f"""
+You are an advanced AI medical assistant helping {doctor_name} ({specialization}) analyze a medical document. Please provide a comprehensive analysis of the attached document with the following context:
+
+**PATIENT INFORMATION:**
+- Name: {patient_name}
+- Age: {patient_age}
+- Gender: {patient_gender}
+- Blood Group: {blood_group}
+- Known Allergies: {allergies}
+- Medical History: {medical_history}
+
+**CURRENT VISIT CONTEXT:**
+- Visit Date: {visit_date}
+- Chief Complaint: {chief_complaint}
+- Symptoms: {symptoms}
+- Clinical Examination: {clinical_examination}
+- Current Diagnosis: {diagnosis}
+- Tests Recommended: {tests_recommended}
+
+**DOCUMENT TO ANALYZE:**
+- File Name: {file_name}
+
+Please provide a detailed analysis in the following structured format:
+
+**1. DOCUMENT SUMMARY:**
+- Type of medical document (lab report, imaging, prescription, etc.)
+- Key findings and values
+- Date of the test/document (if available)
+
+**2. CLINICAL SIGNIFICANCE:**
+- Normal vs abnormal findings
+- Reference ranges and interpretations
+- Critical values that need immediate attention
+
+**3. CORRELATION WITH PATIENT CONTEXT:**
+- How findings relate to the patient's chief complaint
+- Relevance to current symptoms
+- Connection to medical history and current diagnosis
+
+**4. ACTIONABLE INSIGHTS:**
+- Immediate actions required (if any)
+- Follow-up recommendations
+- Additional tests that might be needed
+- Treatment considerations
+
+**5. CLINICAL NOTES:**
+- Important observations for medical records
+- Trends or patterns noted
+- Quality of the document/test
+
+**IMPORTANT GUIDELINES:**
+- Focus on medically relevant information
+- Highlight any critical or abnormal findings
+- Consider the patient's specific context and history
+- Provide actionable insights for clinical decision-making
+- Be thorough but concise
+- If uncertain about any finding, clearly state the limitation
+
+Please analyze the document thoroughly and provide insights that will help Dr. {doctor_name} make informed clinical decisions for {patient_name}.
+"""
+        
+        return prompt
+    
+    def _calculate_age(self, date_of_birth: str) -> str:
+        """Calculate age from date of birth"""
+        try:
+            if not date_of_birth:
+                return "Not specified"
+            
+            from datetime import date
+            birth_date = datetime.strptime(date_of_birth, "%Y-%m-%d").date()
+            today = date.today()
+            age = today.year - birth_date.year
+            
+            # Adjust if birthday hasn't occurred this year
+            if today < birth_date.replace(year=today.year):
+                age -= 1
+                
+            return f"{age} years"
+        except:
+            return "Unable to calculate"
+    
+    async def _perform_gemini_analysis(
+        self, 
+        prompt: str, 
+        document_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Perform the actual AI analysis using Gemini"""
+        try:
+            loop = asyncio.get_event_loop()
+            
+            # Prepare content for Gemini
+            if document_data["type"] == "text":
+                content = [prompt, document_data["content"]]
+            elif document_data["type"] == "image":
+                # Create image object for Gemini
+                image_part = {
+                    "mime_type": document_data["mime_type"],
+                    "data": document_data["content"]
+                }
+                content = [prompt, image_part]
+            else:
+                # For PDF or other types, include as text if possible
+                content = [prompt, f"Document content: {document_data.get('content', 'Unable to extract content')}"]
+            
+            # Generate response using Gemini
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.model.generate_content(content)
+            )
+            
+            if response and response.text:
+                analysis_text = response.text
+                
+                # Parse the structured response
+                parsed_analysis = self._parse_analysis_response(analysis_text)
+                
+                return {
+                    "raw_analysis": analysis_text,
+                    "structured_analysis": parsed_analysis,
+                    "confidence_score": self._calculate_confidence(analysis_text),
+                    "analysis_length": len(analysis_text),
+                    "key_findings": self._extract_key_findings(parsed_analysis)
+                }
+            else:
+                return {
+                    "error": "No response from AI model",
+                    "raw_analysis": "",
+                    "structured_analysis": {},
+                    "confidence_score": 0.0
+                }
+                
+        except Exception as e:
+            print(f"Error in Gemini analysis: {e}")
+            return {
+                "error": str(e),
+                "raw_analysis": "",
+                "structured_analysis": {},
+                "confidence_score": 0.0
+            }
+    
+    def _parse_analysis_response(self, analysis_text: str) -> Dict[str, Any]:
+        """Parse the structured analysis response from Gemini"""
+        try:
+            sections = {
+                "document_summary": "",
+                "clinical_significance": "",
+                "correlation_with_patient": "",
+                "actionable_insights": "",
+                "patient_communication": "",
+                "clinical_notes": ""
+            }
+            
+            # Simple parsing based on section headers
+            current_section = None
+            lines = analysis_text.split('\n')
+            
+            for line in lines:
+                line = line.strip()
+                
+                # Check for section headers
+                if "DOCUMENT SUMMARY" in line.upper():
+                    current_section = "document_summary"
+                elif "CLINICAL SIGNIFICANCE" in line.upper():
+                    current_section = "clinical_significance"
+                elif "CORRELATION WITH PATIENT" in line.upper():
+                    current_section = "correlation_with_patient"
+                elif "ACTIONABLE INSIGHTS" in line.upper():
+                    current_section = "actionable_insights"
+                elif "PATIENT COMMUNICATION" in line.upper():
+                    current_section = "patient_communication"
+                elif "CLINICAL NOTES" in line.upper():
+                    current_section = "clinical_notes"
+                elif line and current_section and not line.startswith('**'):
+                    # Add content to current section
+                    if sections[current_section]:
+                        sections[current_section] += " " + line
+                    else:
+                        sections[current_section] = line
+            
+            return sections
+            
+        except Exception as e:
+            print(f"Error parsing analysis response: {e}")
+            return {
+                "document_summary": analysis_text[:500] + "..." if len(analysis_text) > 500 else analysis_text,
+                "clinical_significance": "",
+                "correlation_with_patient": "",
+                "actionable_insights": "",
+                "patient_communication": "",
+                "clinical_notes": ""
+            }
+    
+    def _calculate_confidence(self, analysis_text: str) -> float:
+        """Calculate a confidence score based on analysis quality"""
+        try:
+            # Simple heuristic based on length and content
+            base_score = 0.7
+            
+            # Increase score based on length (more detailed = higher confidence)
+            if len(analysis_text) > 1000:
+                base_score += 0.1
+            if len(analysis_text) > 2000:
+                base_score += 0.1
+            
+            # Increase score if specific medical terms are present
+            medical_indicators = [
+                'normal', 'abnormal', 'reference range', 'significant',
+                'recommend', 'follow-up', 'critical', 'within limits'
+            ]
+            
+            found_indicators = sum(1 for indicator in medical_indicators 
+                                 if indicator.lower() in analysis_text.lower())
+            
+            confidence_bonus = min(0.1, found_indicators * 0.02)
+            
+            return min(0.95, base_score + confidence_bonus)
+            
+        except:
+            return 0.7
+    
+    def _extract_key_findings(self, structured_analysis: Dict[str, Any]) -> List[str]:
+        """Extract key findings from the structured analysis"""
+        try:
+            key_findings = []
+            
+            # Extract from document summary
+            summary = structured_analysis.get("document_summary", "")
+            if "abnormal" in summary.lower() or "critical" in summary.lower():
+                key_findings.append("Abnormal findings detected")
+            
+            # Extract from clinical significance
+            significance = structured_analysis.get("clinical_significance", "")
+            if "immediate attention" in significance.lower():
+                key_findings.append("Requires immediate attention")
+            
+            # Extract from actionable insights
+            insights = structured_analysis.get("actionable_insights", "")
+            if "follow-up" in insights.lower():
+                key_findings.append("Follow-up recommended")
+            
+            # If no specific findings, add a general one
+            if not key_findings:
+                key_findings.append("Analysis completed")
+            
+            return key_findings[:5]  # Limit to 5 key findings
+            
+        except:
+            return ["Analysis completed"]
+    
+    async def analyze_multiple_documents(
+        self,
+        documents: List[Dict[str, Any]],
+        patient_context: Dict[str, Any],
+        visit_context: Dict[str, Any],
+        doctor_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Analyze multiple documents and provide a consolidated analysis"""
+        try:
+            individual_analyses = []
+            
+            # Analyze each document
+            for doc in documents:
+                analysis = await self.analyze_document(
+                    doc["content"],
+                    doc["file_name"],
+                    doc["file_type"],
+                    patient_context,
+                    visit_context,
+                    doctor_context
+                )
+                individual_analyses.append({
+                    "file_name": doc["file_name"],
+                    "analysis": analysis
+                })
+            
+            # Create consolidated analysis
+            consolidated_prompt = self._create_consolidated_prompt(
+                individual_analyses, patient_context, visit_context, doctor_context
+            )
+            
+            # Generate consolidated insights
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.model.generate_content(consolidated_prompt)
+            )
+            
+            return {
+                "success": True,
+                "individual_analyses": individual_analyses,
+                "consolidated_analysis": response.text if response and response.text else "Unable to generate consolidated analysis",
+                "total_documents": len(documents),
+                "processed_at": datetime.now(timezone.utc).isoformat()
+            }
+            
+        except Exception as e:
+            print(f"Error in multi-document analysis: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "individual_analyses": individual_analyses if 'individual_analyses' in locals() else [],
+                "consolidated_analysis": None
+            }
+    
+    def _create_consolidated_prompt(
+        self,
+        analyses: List[Dict[str, Any]],
+        patient_context: Dict[str, Any],
+        visit_context: Dict[str, Any],
+        doctor_context: Dict[str, Any]
+    ) -> str:
+        """Create prompt for consolidated analysis of multiple documents"""
+        
+        patient_name = f"{patient_context.get('first_name', '')} {patient_context.get('last_name', '')}"
+        doctor_name = f"Dr. {doctor_context.get('first_name', '')} {doctor_context.get('last_name', '')}"
+        
+        analyses_summary = ""
+        for i, analysis in enumerate(analyses, 1):
+            analyses_summary += f"\n**Document {i}: {analysis['file_name']}**\n"
+            if analysis['analysis']['success']:
+                # Access the raw_analysis from the analysis result
+                raw_analysis = analysis['analysis']['analysis']['raw_analysis']
+                analyses_summary += raw_analysis[:500] + "...\n"
+            else:
+                analyses_summary += f"Analysis failed: {analysis['analysis']['error']}\n"
+        
+        prompt = f"""
+You are helping {doctor_name} create a consolidated analysis of multiple medical documents for patient {patient_name}.
+
+**INDIVIDUAL DOCUMENT ANALYSES:**
+{analyses_summary}
+
+**PATIENT CONTEXT:**
+- Chief Complaint: {visit_context.get('chief_complaint', 'Not specified')}
+- Current Symptoms: {visit_context.get('symptoms', 'None specified')}
+- Medical History: {patient_context.get('medical_history', 'None provided')}
+
+Please provide a **CONSOLIDATED MEDICAL ANALYSIS** that:
+
+1. **OVERALL ASSESSMENT:**
+   - Synthesize findings across all documents
+   - Identify patterns and correlations
+   - Highlight any conflicting information
+
+2. **COMPREHENSIVE CLINICAL PICTURE:**
+   - How all results relate to the patient's presentation
+   - Complete diagnostic picture
+   - Risk assessment
+
+3. **INTEGRATED RECOMMENDATIONS:**
+   - Prioritized action items
+   - Coordinated treatment approach
+   - Next steps based on all findings
+
+4. **SUMMARY FOR PATIENT:**
+   - Unified explanation of all test results
+   - Key takeaways in simple terms
+   - Coordinated care plan
+
+Focus on creating a cohesive medical narrative that helps Dr. {doctor_name} make comprehensive clinical decisions for {patient_name}.
+"""
+        
+        return prompt
+    
+    async def analyze_patient_comprehensive_history(
+        self,
+        patient_context: Dict[str, Any],
+        visits: List[Dict[str, Any]],
+        reports: List[Dict[str, Any]],
+        existing_analyses: List[Dict[str, Any]],
+        doctor_context: Dict[str, Any],
+        analysis_period_months: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Perform comprehensive analysis of patient's complete medical history
+        
+        Args:
+            patient_context: Patient information and demographics
+            visits: List of all patient visits
+            reports: List of all medical reports/documents
+            existing_analyses: Previous AI analyses for this patient
+            doctor_context: Doctor information
+            analysis_period_months: Optional time period limit
+        
+        Returns:
+            Dict containing comprehensive analysis results
+        """
+        try:
+            print(f"Starting comprehensive history analysis for patient {patient_context.get('id')}")
+            
+            # Prepare comprehensive prompt
+            prompt = self._create_comprehensive_history_prompt(
+                patient_context,
+                visits,
+                reports,
+                existing_analyses,
+                doctor_context,
+                analysis_period_months
+            )
+            
+            # Perform analysis
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.model.generate_content(prompt)
+            )
+            
+            if response and response.text:
+                analysis_text = response.text
+            else:
+                return {
+                    "success": False,
+                    "error": "No response from AI model"
+                }
+            
+            if not analysis_text:
+                return {
+                    "success": False,
+                    "error": "Failed to generate analysis text"
+                }
+            
+            # Parse and structure the analysis
+            structured_analysis = self._parse_comprehensive_analysis(analysis_text)
+            
+            return {
+                "success": True,
+                "comprehensive_analysis": analysis_text,
+                "confidence_score": 0.85,
+                "processed_at": datetime.now(timezone.utc).isoformat(),
+                **structured_analysis
+            }
+            
+        except Exception as e:
+            print(f"Error in comprehensive history analysis: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def _create_comprehensive_history_prompt(
+        self,
+        patient_context: Dict[str, Any],
+        visits: List[Dict[str, Any]],
+        reports: List[Dict[str, Any]],
+        existing_analyses: List[Dict[str, Any]],
+        doctor_context: Dict[str, Any],
+        analysis_period_months: Optional[int] = None
+    ) -> str:
+        """Create a comprehensive prompt for patient history analysis"""
+        
+        patient_name = f"{patient_context.get('first_name', '')} {patient_context.get('last_name', '')}"
+        doctor_name = f"Dr. {doctor_context.get('first_name', '')} {doctor_context.get('last_name', '')}"
+        doctor_specialization = doctor_context.get('specialization', 'General Practice')
+        
+        # Calculate patient age
+        patient_age = "Unknown"
+        if patient_context.get('date_of_birth'):
+            try:
+                dob = datetime.strptime(patient_context['date_of_birth'], '%Y-%m-%d')
+                age = (datetime.now() - dob).days // 365
+                patient_age = f"{age} years old"
+            except:
+                pass
+        
+        # Format time period
+        period_text = ""
+        if analysis_period_months:
+            period_text = f" over the last {analysis_period_months} months"
+        else:
+            period_text = " across their complete medical history"
+        
+        # Prepare visits summary
+        visits_summary = ""
+        if visits:
+            visits_summary = f"\n**MEDICAL VISITS ({len(visits)} total):**\n"
+            for i, visit in enumerate(visits[:10], 1):  # Limit to 10 most recent
+                visit_date = visit.get('visit_date', 'Unknown date')
+                visit_type = visit.get('visit_type', 'General')
+                chief_complaint = visit.get('chief_complaint', 'Not specified')
+                diagnosis = visit.get('diagnosis', 'Not specified')
+                treatment = visit.get('treatment_plan', 'Not specified')
+                medications = visit.get('medications', 'None prescribed')
+                
+                visits_summary += f"""
+{i}. **{visit_date} - {visit_type}**
+   - Chief Complaint: {chief_complaint}
+   - Diagnosis: {diagnosis}
+   - Treatment: {treatment}
+   - Medications: {medications}"""
+            
+            if len(visits) > 10:
+                visits_summary += f"\n... and {len(visits) - 10} more visits"
+        
+        # Prepare reports summary
+        reports_summary = ""
+        if reports:
+            reports_summary = f"\n**MEDICAL REPORTS/TESTS ({len(reports)} total):**\n"
+            for i, report in enumerate(reports[:10], 1):  # Limit to 10 most recent
+                file_name = report.get('file_name', 'Unknown file')
+                test_type = report.get('test_type', 'General Report')
+                uploaded_date = report.get('uploaded_at', 'Unknown date')
+                
+                reports_summary += f"\n{i}. **{file_name}** ({test_type}) - {uploaded_date}"
+            
+            if len(reports) > 10:
+                reports_summary += f"\n... and {len(reports) - 10} more reports"
+        
+        # Prepare existing analyses summary
+        analyses_summary = ""
+        if existing_analyses:
+            analyses_summary = f"\n**PREVIOUS AI ANALYSES ({len(existing_analyses)} total):**\n"
+            for i, analysis in enumerate(existing_analyses[:5], 1):  # Limit to 5 most recent
+                analyzed_date = analysis.get('analyzed_at', 'Unknown date')
+                clinical_significance = analysis.get('clinical_significance', 'Not available')
+                key_findings = analysis.get('key_findings', [])
+                
+                analyses_summary += f"""
+{i}. **Analysis from {analyzed_date}**
+   - Clinical Significance: {clinical_significance[:200]}...
+   - Key Findings: {', '.join(key_findings[:3]) if key_findings else 'None specified'}"""
+        
+        prompt = f"""
+You are an advanced AI medical assistant helping {doctor_name} ({doctor_specialization}) analyze the complete medical history of {patient_name} ({patient_age}){period_text}.
+
+**PATIENT DEMOGRAPHICS:**
+- Name: {patient_name}
+- Age: {patient_age}
+- Gender: {patient_context.get('gender', 'Not specified')}
+- Blood Group: {patient_context.get('blood_group', 'Not specified')}
+- Known Allergies: {patient_context.get('allergies', 'None reported')}
+- Medical History: {patient_context.get('medical_history', 'None provided')}
+- Emergency Contact: {patient_context.get('emergency_contact_name', 'Not provided')}
+
+{visits_summary}
+
+{reports_summary}
+
+{analyses_summary}
+
+**COMPREHENSIVE ANALYSIS REQUEST:**
+
+Please provide a thorough, professional analysis covering:
+
+1. **COMPREHENSIVE MEDICAL SUMMARY:**
+   - Overall health trajectory and patterns
+   - Significant medical events and milestones
+   - Evolution of health conditions over time
+
+2. **MEDICAL TRAJECTORY ANALYSIS:**
+   - How the patient's health has changed over time
+   - Progression of any chronic conditions
+   - Response to previous treatments
+
+3. **CHRONIC CONDITIONS & PATTERNS:**
+   - Identify any chronic or recurring conditions
+   - Patterns in symptoms or health issues
+   - Seasonal or cyclical patterns
+
+4. **TREATMENT EFFECTIVENESS:**
+   - Analysis of how well treatments have worked
+   - Medication compliance and effectiveness
+   - Treatment modifications over time
+
+5. **RISK FACTORS IDENTIFICATION:**
+   - Current and emerging health risks
+   - Lifestyle factors affecting health
+   - Genetic or hereditary concerns
+
+6. **SIGNIFICANT CLINICAL FINDINGS:**
+   - Most important test results and findings
+   - Abnormal values requiring attention
+   - Trends in laboratory values
+
+7. **COMPREHENSIVE RECOMMENDATIONS:**
+   - Preventive care recommendations
+   - Lifestyle modifications
+   - Follow-up care planning
+   - Screening recommendations
+
+8. **LIFESTYLE & MEDICATION HISTORY:**
+   - Impact of lifestyle factors on health
+   - Medication history and interactions
+   - Side effects or adverse reactions
+
+9. **FOLLOW-UP SUGGESTIONS:**
+   - Recommended monitoring schedule
+   - Specialist referrals if needed
+   - Future diagnostic tests
+
+This analysis will help Dr. {doctor_name} provide comprehensive, informed care for {patient_name}, especially if they're returning after a long time. Focus on clinically relevant insights that will enhance patient care and decision-making.
+
+Please structure your response clearly with appropriate medical terminology while ensuring it's comprehensive and actionable.
+"""
+        
+        return prompt
+    
+    def _parse_comprehensive_analysis(self, analysis_text: str) -> Dict[str, Any]:
+        """Parse the comprehensive analysis text into structured components"""
+        try:
+            # Simple parsing - in a real implementation, you might want more sophisticated parsing
+            sections = {
+                "summary": "",
+                "medical_trajectory": "",
+                "chronic_conditions": [],
+                "recurring_patterns": [],
+                "treatment_effectiveness": "",
+                "risk_factors": [],
+                "recommendations": [],
+                "significant_findings": [],
+                "lifestyle_factors": "",
+                "medication_history": "",
+                "follow_up_suggestions": []
+            }
+            
+            # Extract key information from analysis text
+            # This is a simplified version - you might want to implement more sophisticated parsing
+            lines = analysis_text.split('\n')
+            current_section = None
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Look for section headers
+                if "COMPREHENSIVE MEDICAL SUMMARY" in line.upper():
+                    current_section = "summary"
+                elif "MEDICAL TRAJECTORY" in line.upper():
+                    current_section = "medical_trajectory"
+                elif "CHRONIC CONDITIONS" in line.upper() or "PATTERNS" in line.upper():
+                    current_section = "chronic_conditions"
+                elif "TREATMENT EFFECTIVENESS" in line.upper():
+                    current_section = "treatment_effectiveness"
+                elif "RISK FACTORS" in line.upper():
+                    current_section = "risk_factors"
+                elif "RECOMMENDATIONS" in line.upper():
+                    current_section = "recommendations"
+                elif "SIGNIFICANT" in line.upper() and "FINDINGS" in line.upper():
+                    current_section = "significant_findings"
+                elif "LIFESTYLE" in line.upper():
+                    current_section = "lifestyle_factors"
+                elif "MEDICATION HISTORY" in line.upper():
+                    current_section = "medication_history"
+                elif "FOLLOW-UP" in line.upper():
+                    current_section = "follow_up_suggestions"
+                elif current_section and line:
+                    # Add content to current section
+                    if current_section in ["chronic_conditions", "risk_factors", "recommendations", "significant_findings", "follow_up_suggestions"]:
+                        # For list sections, extract bullet points
+                        if line.startswith(('- ', '• ', '* ', '1. ', '2. ', '3. ')):
+                            clean_line = line.lstrip('- •*123456789. ').strip()
+                            if clean_line:
+                                sections[current_section].append(clean_line)
+                    else:
+                        # For text sections, append to string
+                        if sections[current_section]:
+                            sections[current_section] += " " + line
+                        else:
+                            sections[current_section] = line
+            
+            # Clean up text sections (limit length)
+            for key in ["summary", "medical_trajectory", "treatment_effectiveness", "lifestyle_factors", "medication_history"]:
+                if len(sections[key]) > 1000:
+                    sections[key] = sections[key][:1000] + "..."
+            
+            return sections
+            
+        except Exception as e:
+            print(f"Error parsing comprehensive analysis: {e}")
+            return {
+                "summary": analysis_text[:500] + "..." if len(analysis_text) > 500 else analysis_text,
+                "medical_trajectory": "",
+                "chronic_conditions": [],
+                "recurring_patterns": [],
+                "treatment_effectiveness": "",
+                "risk_factors": [],
+                "recommendations": [],
+                "significant_findings": [],
+                "lifestyle_factors": "",
+                "medication_history": "",
+                "follow_up_suggestions": []
+            }
+    
+    def _generate_text_response(self, prompt: str) -> str:
+        """Generate text response using Gemini model"""
+        try:
+            response = self.model.generate_content(prompt)
+            if response and response.text:
+                return response.text
+            else:
+                return ""
+        except Exception as e:
+            print(f"Error generating text response: {e}")
+            return ""
+    
+    def __del__(self):
+        """Cleanup thread pool executor"""
+        if hasattr(self, 'executor'):
+            self.executor.shutdown(wait=False)
