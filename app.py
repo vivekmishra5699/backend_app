@@ -30,6 +30,7 @@ from datetime import timedelta
 import httpx
 import uvicorn
 from async_file_downloader import file_downloader
+from connection_pool import get_supabase_client, close_connection_pools
 import firebase_admin
 import hashlib
 import hmac
@@ -79,6 +80,11 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
         print("✅ AI Analysis background processor stopped")
+        
+        # Close connection pools
+        print("🔌 Closing connection pools...")
+        await close_connection_pools()
+        print("✅ Connection pools closed successfully")
 
 app = FastAPI(title="Doctor App API", version="1.0.0", lifespan=lifespan)
 
@@ -130,9 +136,16 @@ try:
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise ValueError("Service role key is required for RLS-enabled operations")
     
-    # Use service role client for database operations
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-    print("Supabase initialized successfully with service role")
+    # Use service role client with connection pooling for database operations
+    supabase: Client = get_supabase_client(
+        supabase_url=SUPABASE_URL,
+        supabase_key=SUPABASE_SERVICE_ROLE_KEY,
+        pool_size=10,  # Maintain 10 active connections
+        max_overflow=20,  # Allow up to 20 overflow connections
+        pool_timeout=30,  # Connection timeout
+        pool_recycle=3600  # Recycle connections after 1 hour
+    )
+    print("✅ Supabase initialized with connection pooling")
     
     # Initialize database manager with service role client
     db = DatabaseManager(supabase)

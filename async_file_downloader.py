@@ -6,19 +6,22 @@ import asyncio
 import httpx
 from typing import Optional, Dict, Any
 from datetime import datetime
+from connection_pool import get_http_client
 
 
 class AsyncFileDownloader:
     """
     Handles asynchronous file downloads without blocking the event loop.
     Supports streaming for large files and automatic retry logic.
+    Uses connection pooling for better performance.
     """
     
     def __init__(
         self,
         timeout: float = 30.0,
         max_retries: int = 3,
-        chunk_size: int = 1024 * 1024  # 1MB chunks
+        chunk_size: int = 1024 * 1024,  # 1MB chunks
+        use_connection_pool: bool = True
     ):
         """
         Initialize the async file downloader.
@@ -27,10 +30,24 @@ class AsyncFileDownloader:
             timeout: Request timeout in seconds
             max_retries: Maximum number of retry attempts
             chunk_size: Size of chunks for streaming downloads (bytes)
+            use_connection_pool: Whether to use shared connection pool (recommended)
         """
         self.timeout = timeout
         self.max_retries = max_retries
         self.chunk_size = chunk_size
+        self.use_connection_pool = use_connection_pool
+        self._http_client = None
+    
+    def _get_client(self) -> httpx.AsyncClient:
+        """Get HTTP client - either pooled or standalone"""
+        if self.use_connection_pool:
+            # Use shared connection pool for better performance
+            return get_http_client(timeout=self.timeout)
+        else:
+            # Create standalone client (not recommended)
+            if self._http_client is None or self._http_client.is_closed:
+                self._http_client = httpx.AsyncClient(timeout=self.timeout)
+            return self._http_client
     
     async def download_file(
         self,
@@ -53,42 +70,44 @@ class AsyncFileDownloader:
         
         for attempt in range(1, self.max_retries + 1):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout) as client:
-                    if stream:
-                        # Stream download for large files
-                        async with client.stream('GET', url, headers=headers) as response:
-                            if response.status_code == 200:
-                                chunks = []
-                                total_size = 0
-                                
-                                async for chunk in response.aiter_bytes(chunk_size=self.chunk_size):
-                                    chunks.append(chunk)
-                                    total_size += len(chunk)
-                                    # Allow other tasks to run between chunks
-                                    await asyncio.sleep(0)
-                                
-                                file_content = b''.join(chunks)
-                                elapsed = (datetime.now() - start_time).total_seconds()
-                                
-                                print(f"✅ Downloaded {total_size / 1024 / 1024:.2f}MB in {elapsed:.2f}s (attempt {attempt})")
-                                return file_content
-                            else:
-                                print(f"⚠️ Download failed: HTTP {response.status_code} (attempt {attempt})")
-                                if attempt < self.max_retries:
-                                    await asyncio.sleep(1 * attempt)  # Exponential backoff
-                                continue
-                    else:
-                        # Simple download for small files
-                        response = await client.get(url, headers=headers)
+                # Use connection pooled client
+                client = self._get_client()
+                
+                if stream:
+                    # Stream download for large files
+                    async with client.stream('GET', url, headers=headers) as response:
                         if response.status_code == 200:
+                            chunks = []
+                            total_size = 0
+                            
+                            async for chunk in response.aiter_bytes(chunk_size=self.chunk_size):
+                                chunks.append(chunk)
+                                total_size += len(chunk)
+                                # Allow other tasks to run between chunks
+                                await asyncio.sleep(0)
+                            
+                            file_content = b''.join(chunks)
                             elapsed = (datetime.now() - start_time).total_seconds()
-                            print(f"✅ Downloaded {len(response.content) / 1024:.2f}KB in {elapsed:.2f}s")
-                            return response.content
+                            
+                            print(f"✅ Downloaded {total_size / 1024 / 1024:.2f}MB in {elapsed:.2f}s (attempt {attempt})")
+                            return file_content
                         else:
                             print(f"⚠️ Download failed: HTTP {response.status_code} (attempt {attempt})")
                             if attempt < self.max_retries:
-                                await asyncio.sleep(1 * attempt)
+                                await asyncio.sleep(1 * attempt)  # Exponential backoff
                             continue
+                else:
+                    # Simple download for small files
+                    response = await client.get(url, headers=headers)
+                    if response.status_code == 200:
+                        elapsed = (datetime.now() - start_time).total_seconds()
+                        print(f"✅ Downloaded {len(response.content) / 1024:.2f}KB in {elapsed:.2f}s")
+                        return response.content
+                    else:
+                        print(f"⚠️ Download failed: HTTP {response.status_code} (attempt {attempt})")
+                        if attempt < self.max_retries:
+                            await asyncio.sleep(1 * attempt)
+                        continue
                             
             except httpx.TimeoutException as e:
                 print(f"⚠️ Download timeout (attempt {attempt}/{self.max_retries}): {str(e)}")
@@ -210,9 +229,10 @@ class AsyncFileDownloader:
         return downloads
 
 
-# Global instance for reuse across the application
+# Global instance for reuse across the application with connection pooling
 file_downloader = AsyncFileDownloader(
     timeout=30.0,
     max_retries=3,
-    chunk_size=1024 * 1024  # 1MB chunks
+    chunk_size=1024 * 1024,  # 1MB chunks
+    use_connection_pool=True  # Enable connection pooling for better performance
 )
