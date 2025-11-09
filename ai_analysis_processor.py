@@ -24,10 +24,13 @@ class AIAnalysisProcessor:
         self.ai_service = ai_service
         self.is_running = False
         self.process_interval = 10  # Check every 10 seconds
-        self.max_concurrent = 10  # Process max 10 analyses concurrently
+        self.max_concurrent = 3  # Reduced to 3 to avoid rate limits
+        self.delay_between_analyses = 2  # 2 second delay between each analysis
         self.file_downloader = file_downloader  # Use global async downloader
         
         print("🔄 AI Analysis Processor initialized")
+        print(f"   Max concurrent: {self.max_concurrent}")
+        print(f"   Delay between analyses: {self.delay_between_analyses}s")
     
     async def start_processing(self):
         """Start the background processing loop"""
@@ -63,15 +66,19 @@ class AIAnalysisProcessor:
             
             print(f"📋 Found {len(queue_items)} pending AI analyses to process")
             
-            # Process analyses concurrently
-            tasks = []
-            for queue_item in queue_items:
-                task = asyncio.create_task(self.process_single_analysis(queue_item))
-                tasks.append(task)
-            
-            # Wait for all tasks to complete
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+            # Process analyses sequentially with delay to avoid rate limits
+            for i, queue_item in enumerate(queue_items):
+                try:
+                    await self.process_single_analysis(queue_item)
+                    
+                    # Add delay between analyses (except for the last one)
+                    if i < len(queue_items) - 1:
+                        print(f"⏳ Waiting {self.delay_between_analyses}s before next analysis...")
+                        await asyncio.sleep(self.delay_between_analyses)
+                except Exception as e:
+                    print(f"❌ Error processing queue item {queue_item.get('id')}: {e}")
+                    # Continue with next item even if this one fails
+                    continue
                 
         except Exception as e:
             print(f"❌ Error processing pending analyses: {e}")
@@ -155,7 +162,7 @@ class AIAnalysisProcessor:
             processing_time = (datetime.now() - start_time).total_seconds() * 1000
             
             if analysis_result["success"]:
-                # Store analysis results
+                # Store analysis results with enhanced visit-contextual fields
                 analysis_data = {
                     "report_id": report_id,
                     "visit_id": visit_id,
@@ -163,15 +170,21 @@ class AIAnalysisProcessor:
                     "doctor_firebase_uid": doctor_firebase_uid,
                     "analysis_type": "document_analysis",
                     "model_used": analysis_result["model_used"],
-                    "confidence_score": analysis_result["analysis"]["confidence_score"],
-                    "raw_analysis": analysis_result["analysis"]["raw_analysis"],
+                    "confidence_score": analysis_result["analysis"].get("confidence_score", 0.7),
+                    "raw_analysis": analysis_result["analysis"].get("raw_analysis", ""),
+                    # Enhanced visit-contextual fields
+                    "clinical_correlation": analysis_result["analysis"]["structured_analysis"].get("clinical_correlation"),
+                    "detailed_findings": analysis_result["analysis"]["structured_analysis"].get("detailed_findings"),
+                    "critical_findings": analysis_result["analysis"]["structured_analysis"].get("critical_findings"),
+                    "treatment_evaluation": analysis_result["analysis"]["structured_analysis"].get("treatment_evaluation"),
+                    # Original fields (keeping for backward compatibility)
                     "document_summary": analysis_result["analysis"]["structured_analysis"].get("document_summary"),
                     "clinical_significance": analysis_result["analysis"]["structured_analysis"].get("clinical_significance"),
                     "correlation_with_patient": analysis_result["analysis"]["structured_analysis"].get("correlation_with_patient"),
                     "actionable_insights": analysis_result["analysis"]["structured_analysis"].get("actionable_insights"),
                     "patient_communication": analysis_result["analysis"]["structured_analysis"].get("patient_communication"),
                     "clinical_notes": analysis_result["analysis"]["structured_analysis"].get("clinical_notes"),
-                    "key_findings": analysis_result["analysis"]["key_findings"],
+                    "key_findings": analysis_result["analysis"].get("key_findings", []),
                     "analysis_success": True,
                     "analysis_error": None,
                     "processing_time_ms": int(processing_time),
