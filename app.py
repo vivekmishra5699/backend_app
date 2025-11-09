@@ -1104,6 +1104,12 @@ class AIAnalysisResult(BaseModel):
     model_used: str
     confidence_score: float
     raw_analysis: str
+    # Enhanced visit-contextual fields
+    clinical_correlation: Optional[str] = None
+    detailed_findings: Optional[str] = None
+    critical_findings: Optional[str] = None
+    treatment_evaluation: Optional[str] = None
+    # Original fields (keeping for backward compatibility)
     document_summary: Optional[str] = None
     clinical_significance: Optional[str] = None
     correlation_with_patient: Optional[str] = None
@@ -8338,7 +8344,7 @@ async def analyze_report_with_ai(
         processing_time = (datetime.now() - start_time).total_seconds() * 1000
         
         if analysis_result["success"]:
-            # Store analysis in database
+            # Store analysis in database with enhanced visit-contextual fields
             analysis_data = {
                 "report_id": report_id,
                 "visit_id": report["visit_id"],
@@ -8348,6 +8354,12 @@ async def analyze_report_with_ai(
                 "model_used": analysis_result["model_used"],
                 "confidence_score": analysis_result["analysis"]["confidence_score"],
                 "raw_analysis": analysis_result["analysis"]["raw_analysis"],
+                # Enhanced visit-contextual fields
+                "clinical_correlation": analysis_result["analysis"]["structured_analysis"].get("clinical_correlation"),
+                "detailed_findings": analysis_result["analysis"]["structured_analysis"].get("detailed_findings"),
+                "critical_findings": analysis_result["analysis"]["structured_analysis"].get("critical_findings"),
+                "treatment_evaluation": analysis_result["analysis"]["structured_analysis"].get("treatment_evaluation"),
+                # Original fields (keeping for backward compatibility)
                 "document_summary": analysis_result["analysis"]["structured_analysis"].get("document_summary"),
                 "clinical_significance": analysis_result["analysis"]["structured_analysis"].get("clinical_significance"),
                 "correlation_with_patient": analysis_result["analysis"]["structured_analysis"].get("correlation_with_patient"),
