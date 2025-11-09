@@ -17,9 +17,10 @@ import concurrent.futures
 class AIAnalysisService:
     def __init__(self):
         """Initialize the AI Analysis Service with Gemini 2.0 Flash"""
-        self.api_key = os.getenv("GEMINI_API_KEY")
+        # Try GOOGLE_API_KEY first (as per README), fallback to GEMINI_API_KEY for backward compatibility
+        self.api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not self.api_key:
-            raise ValueError("GEMINI_API_KEY not found in environment variables")
+            raise ValueError("GOOGLE_API_KEY not found in environment variables")
         
         # Configure Gemini
         genai.configure(api_key=self.api_key)

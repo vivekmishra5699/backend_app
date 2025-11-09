@@ -5211,7 +5211,7 @@ async def send_whatsapp_report_link(
             )
         
         # Generate the full upload URL
-        base_url = os.getenv("PUBLIC_BASE_URL", "https://livestock-pi-excess-recorder.trycloudflare.com")
+        base_url = os.getenv("PUBLIC_BASE_URL", "https://retreat-incentives-cook-solutions.trycloudflare.com")
         upload_url = f"{base_url.rstrip('/')}/upload-reports/{upload_token}"
         
         # Prepare response data
@@ -8892,7 +8892,6 @@ async def analyze_patient_comprehensive_history(
             analysis_is_outdated = False
             if existing_analysis.get("total_visits", 0) != len(visits) or existing_analysis.get("total_reports", 0) != len(reports):
                 analysis_is_outdated = True
-                print(f"Analysis outdated: visits changed from {existing_analysis.get('total_visits', 0)} to {len(visits)}, reports changed from {existing_analysis.get('total_reports', 0)} to {len(reports)}")
             
             # Return cached analysis only if it's recent AND data hasn't changed
             if time_diff.total_seconds() < 24 * 3600 and not analysis_is_outdated:  # Less than 24 hours old and data unchanged
@@ -8904,7 +8903,6 @@ async def analyze_patient_comprehensive_history(
                 }
             elif analysis_is_outdated:
                 # Delete the outdated analysis to force regeneration
-                print(f"Deleting outdated analysis for patient {patient_id}")
                 await db.delete_patient_history_analysis(existing_analysis["id"], current_doctor["firebase_uid"])
         
         # Get all patient visits
@@ -9035,6 +9033,7 @@ async def analyze_patient_comprehensive_history(
             }
             
             created_analysis = await db.create_patient_history_analysis(analysis_data)
+            
             if created_analysis:
                 return {
                     "message": "Comprehensive patient history analysis completed successfully",
@@ -9107,6 +9106,7 @@ async def get_patient_history_analysis(
             )
         
         analysis = await db.get_latest_patient_history_analysis(patient_id, current_doctor["firebase_uid"])
+        
         if not analysis:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -9150,6 +9150,75 @@ async def get_patient_history_analyses(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch patient history analyses"
         )
+
+@app.post("/patients/{patient_id}/cleanup-history-analyses", response_model=dict)
+async def cleanup_patient_history_analyses(
+    patient_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """Clean up/delete all patient history analyses for a specific patient (for testing/debugging)"""
+    try:
+        success = await db.delete_patient_history_analyses_by_patient(patient_id, current_doctor["firebase_uid"])
+        if success:
+            return {
+                "message": f"Successfully cleaned up all history analyses for patient {patient_id}",
+                "patient_id": patient_id
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No analyses found to clean up"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error cleaning up patient history analyses: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clean up patient history analyses"
+        )
+
+@app.get("/patients/{patient_id}/history-analysis-debug", response_model=dict)
+async def debug_patient_history_analysis(
+    patient_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """DEBUG: Get raw analysis data directly from database"""
+    try:
+        analysis = await db.get_latest_patient_history_analysis(patient_id, current_doctor["firebase_uid"])
+        
+        if not analysis:
+            return {
+                "found": False,
+                "message": "No analysis found in database",
+                "patient_id": patient_id
+            }
+        
+        return {
+            "found": True,
+            "analysis_id": analysis.get('id'),
+            "patient_id": analysis.get('patient_id'),
+            "analyzed_at": analysis.get('analyzed_at'),
+            "total_visits": analysis.get('total_visits'),
+            "total_reports": analysis.get('total_reports'),
+            "analysis_success": analysis.get('analysis_success'),
+            "raw_analysis_length": len(analysis.get('raw_analysis', '')),
+            "raw_analysis_preview": analysis.get('raw_analysis', '')[:500],
+            "comprehensive_summary_length": len(analysis.get('comprehensive_summary', '') or ''),
+            "comprehensive_summary": analysis.get('comprehensive_summary'),
+            "medical_trajectory": analysis.get('medical_trajectory'),
+            "chronic_conditions": analysis.get('chronic_conditions'),
+            "recommendations": analysis.get('recommendations'),
+            "all_fields": list(analysis.keys())
+        }
+        
+    except Exception as e:
+        print(f"Error in debug endpoint: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 @app.post("/patients/{patient_id}/cleanup-history-analyses", response_model=dict)
 async def cleanup_patient_history_analyses(

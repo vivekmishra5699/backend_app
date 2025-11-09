@@ -1186,16 +1186,27 @@ class DatabaseManager:
     async def create_patient_history_analysis(self, analysis_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Create a new patient history analysis record"""
         try:
+            print(f"🔍 Database: Inserting patient history analysis...")
+            print(f"   Patient ID: {analysis_data.get('patient_id')}")
+            print(f"   Doctor UID: {analysis_data.get('doctor_firebase_uid')}")
+            print(f"   Raw analysis length: {len(analysis_data.get('raw_analysis', ''))}")
+            
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(
                 self.executor, 
                 lambda: self.supabase.table("patient_history_analysis").insert(analysis_data).execute()
             )
+            
+            print(f"📦 Supabase response: data={bool(response.data)}, count={getattr(response, 'count', None)}")
+            
             if response.data:
+                print(f"✅ Successfully inserted analysis with ID: {response.data[0].get('id')}")
                 return response.data[0]
-            return None
+            else:
+                print(f"❌ No data returned from insert operation")
+                return None
         except Exception as e:
-            print(f"Error creating patient history analysis: {e}")
+            print(f"❌ Error creating patient history analysis: {e}")
             print(f"Traceback: {traceback.format_exc()}")
             return None
 
