@@ -31,6 +31,8 @@ import httpx
 import uvicorn
 from async_file_downloader import file_downloader
 from connection_pool import get_supabase_client, close_connection_pools
+from thread_pool_manager import shutdown_thread_pool
+from optimized_cache import optimized_cache
 import firebase_admin
 import hashlib
 import hmac
@@ -81,10 +83,21 @@ async def lifespan(app: FastAPI):
                 pass
         print("✅ AI Analysis background processor stopped")
         
+        # Get cache stats before shutdown
+        print("📊 Final cache statistics:")
+        cache_stats = await optimized_cache.get_stats()
+        for key, value in cache_stats.items():
+            print(f"   - {key}: {value}")
+        
         # Close connection pools
         print("🔌 Closing connection pools...")
         await close_connection_pools()
         print("✅ Connection pools closed successfully")
+        
+        # Shutdown unified thread pool
+        print("🧵 Shutting down unified thread pool...")
+        shutdown_thread_pool(wait=True)
+        print("✅ Thread pool shut down successfully")
 
 app = FastAPI(title="Doctor App API", version="1.0.0", lifespan=lifespan)
 

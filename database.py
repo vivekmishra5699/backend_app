@@ -3,21 +3,29 @@ from typing import Optional, List, Dict, Any
 import traceback
 import asyncio
 from datetime import datetime, timezone
-import concurrent.futures
-from query_cache import QueryCache, cached
+from thread_pool_manager import get_executor
+from optimized_cache import optimized_cache
 
 class DatabaseManager:
     def __init__(self, supabase_client: Client, enable_cache: bool = True):
         self.supabase = supabase_client
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
-        self.cache = QueryCache(default_ttl=300) if enable_cache else None
+        # Use unified thread pool instead of creating a new one
+        self.executor = get_executor()
+        self.cache = optimized_cache if enable_cache else None
         if self.cache:
-            print("✅ Query cache enabled (TTL: 5 minutes)")
+            print("✅ Optimized query cache enabled (5000 entries, 200MB)")
     
     # Doctor related operations
     async def get_doctor_by_firebase_uid(self, firebase_uid: str) -> Optional[Dict[str, Any]]:
         """Get doctor by Firebase UID (CACHED)"""
         try:
+            # Check cache first
+            if self.cache:
+                cache_key = f"doctor_uid:{firebase_uid}"
+                cached_result = await self.cache.get(cache_key)
+                if cached_result is not None:
+                    return cached_result
+            
             print(f"Fetching doctor by Firebase UID: {firebase_uid}")
             
             # Run the synchronous Supabase call in a thread pool
@@ -28,9 +36,14 @@ class DatabaseManager:
             )
             print(f"Supabase response for UID lookup: {response}")
             
-            if response.data:
-                return response.data[0]
-            return None
+            result = response.data[0] if response.data else None
+            
+            # Cache result
+            if self.cache and result:
+                cache_key = f"doctor_uid:{firebase_uid}"
+                await self.cache.set(cache_key, result, ttl=600)  # Cache for 10 minutes
+            
+            return result
         except Exception as e:
             print(f"Error fetching doctor by Firebase UID: {e}")
             print(f"Traceback: {traceback.format_exc()}")
@@ -2821,7 +2834,6 @@ class DatabaseManager:
             return None
 
     # Hospital-based queries for frontdesk users
-    @cached(ttl=300, key_prefix="doctors_by_hospital")
     async def get_doctors_by_hospital(self, hospital_name: str) -> List[Dict[str, Any]]:
         """Get all doctors for a specific hospital (CACHED)"""
         try:
@@ -2873,7 +2885,6 @@ class DatabaseManager:
             print(f"Error fetching patients by hospital: {e}")
             return []
 
-    @cached(ttl=180, key_prefix="doctors_with_counts")
     async def get_doctors_with_patient_count_by_hospital(self, hospital_name: str) -> List[Dict[str, Any]]:
         """Get doctors with their patient count for a specific hospital (OPTIMIZED - SINGLE QUERY)"""
         try:
@@ -2940,7 +2951,6 @@ class DatabaseManager:
             print(f"Traceback: {traceback.format_exc()}")
             return []
 
-    @cached(ttl=180, key_prefix="patients_with_doctor_info")
     async def get_patients_with_doctor_info_by_hospital(self, hospital_name: str) -> List[Dict[str, Any]]:
         """Get patients with their doctor information for a specific hospital (OPTIMIZED - SINGLE QUERY)"""
         try:
@@ -3103,7 +3113,6 @@ class DatabaseManager:
             print(f"Traceback: {traceback.format_exc()}")
             return False
 
-    @cached(ttl=120, key_prefix="hospital_dashboard")
     async def get_hospital_dashboard_optimized(self, hospital_name: str, recent_limit: int = 10) -> Optional[Dict[str, Any]]:
         """Get complete hospital dashboard data in a SINGLE optimized query"""
         try:
