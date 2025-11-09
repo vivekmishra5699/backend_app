@@ -110,18 +110,16 @@ class ConnectionPoolManager:
                 keepalive_expiry=float(pool_recycle)
             )
             
-            # Create Supabase client with custom HTTP client
-            # Note: As of now, supabase-py doesn't directly support custom httpx client
-            # But we configure the environment for optimal connection reuse
-            self._supabase_client = create_client(
-                supabase_url,
-                supabase_key,
-                options={
-                    'schema': 'public',
-                    'auto_refresh_token': True,
-                    'persist_session': True,
-                }
-            )
+            # Create Supabase client without custom options
+            # The newer version of supabase-py (2.0+) doesn't require options parameter
+            try:
+                self._supabase_client = create_client(
+                    supabase_url,
+                    supabase_key
+                )
+            except Exception as e:
+                print(f"❌ Error creating Supabase client: {e}")
+                raise
             
             print(f"✅ Supabase Client configured with connection pooling:")
             print(f"   - Pool size: {pool_size}")
