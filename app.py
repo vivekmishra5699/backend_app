@@ -29,6 +29,7 @@ import jwt
 from datetime import timedelta
 import httpx
 import uvicorn
+from async_file_downloader import file_downloader
 import firebase_admin
 import hashlib
 import hmac
@@ -4891,7 +4892,7 @@ async def download_handwritten_note(
                 detail="Handwritten note not found"
             )
         
-        # Download file from Supabase Storage
+        # Download file from Supabase Storage using async non-blocking download
         storage_path = note["storage_path"]
         if not storage_path:
             raise HTTPException(
@@ -4899,11 +4900,12 @@ async def download_handwritten_note(
                 detail="File storage path not found"
             )
         
-        loop = asyncio.get_event_loop()
         try:
-            file_response = await loop.run_in_executor(
-                None,
-                lambda: supabase.storage.from_("medical-reports").download(storage_path)
+            # Use async downloader to prevent blocking during file download
+            file_response = await file_downloader.download_from_supabase_storage(
+                supabase_client=supabase,
+                bucket_name="medical-reports",
+                file_path=storage_path
             )
             
             if not file_response:
@@ -8274,18 +8276,21 @@ async def analyze_report_with_ai(
                 detail="Visit or patient information not found"
             )
         
-        # Download the file from storage for analysis
+        # Download the file from storage for analysis using async non-blocking download
         file_url = report["file_url"]
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(file_url)
-                if response.status_code == 200:
-                    file_content = response.content
-                else:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="Report file not accessible"
-                    )
+            # Use async file downloader to prevent blocking during download
+            file_content = await file_downloader.download_file(
+                url=file_url,
+                stream=True  # Use streaming for large files
+            )
+            
+            if not file_content:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Report file not accessible"
+                )
+                
         except Exception as download_error:
             print(f"Error downloading file for analysis: {download_error}")
             raise HTTPException(
@@ -8435,24 +8440,30 @@ async def analyze_visit_reports_consolidated(
                     "already_exists": True
                 }
         
-        # Download and prepare documents for analysis
+        # Download and prepare documents for analysis using async non-blocking downloads
         documents = []
+        
+        # Use concurrent downloads to speed up multiple file downloads
+        file_urls = [report["file_url"] for report in reports]
+        downloaded_files = await file_downloader.download_multiple_files(
+            urls=file_urls,
+            concurrent_limit=5  # Download max 5 files at once
+        )
+        
+        # Process downloaded files
         for report in reports:
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(report["file_url"])
-                    if response.status_code == 200:
-                        documents.append({
-                            "content": response.content,
-                            "file_name": report["file_name"],
-                            "file_type": report["file_type"],
-                            "test_type": report.get("test_type", "General Report")
-                        })
-                    else:
-                        print(f"Failed to download report {report['id']}: {response.status_code}")
-            except Exception as download_error:
-                print(f"Error downloading report {report['id']}: {download_error}")
-                continue
+            file_url = report["file_url"]
+            file_content = downloaded_files.get(file_url)
+            
+            if file_content:
+                documents.append({
+                    "content": file_content,
+                    "file_name": report["file_name"],
+                    "file_type": report["file_type"],
+                    "test_type": report.get("test_type", "General Report")
+                })
+            else:
+                print(f"⚠️ Failed to download report {report['id']}")
         
         if not documents:
             raise HTTPException(
@@ -8900,26 +8911,33 @@ async def analyze_patient_comprehensive_history(
                 detail="No medical data found for this patient in the specified period"
             )
         
-        # Download report files for comprehensive analysis
+        # Download report files for comprehensive analysis using async non-blocking downloads
         report_documents = []
-        for report in reports:
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(report["file_url"])
-                    if response.status_code == 200:
-                        report_documents.append({
-                            "content": response.content,
-                            "file_name": report["file_name"],
-                            "file_type": report["file_type"],
-                            "test_type": report.get("test_type", "General Report"),
-                            "uploaded_at": report["uploaded_at"],
-                            "visit_id": report["visit_id"]
-                        })
-                    else:
-                        print(f"Failed to download report {report['id']}: {response.status_code}")
-            except Exception as download_error:
-                print(f"Error downloading report {report['id']}: {download_error}")
-                continue
+        
+        if reports:
+            # Use concurrent downloads to speed up multiple file downloads
+            file_urls = [report["file_url"] for report in reports]
+            downloaded_files = await file_downloader.download_multiple_files(
+                urls=file_urls,
+                concurrent_limit=5  # Download max 5 files at once
+            )
+            
+            # Process downloaded files
+            for report in reports:
+                file_url = report["file_url"]
+                file_content = downloaded_files.get(file_url)
+                
+                if file_content:
+                    report_documents.append({
+                        "content": file_content,
+                        "file_name": report["file_name"],
+                        "file_type": report["file_type"],
+                        "test_type": report.get("test_type", "General Report"),
+                        "uploaded_at": report["uploaded_at"],
+                        "visit_id": report["visit_id"]
+                    })
+                else:
+                    print(f"⚠️ Failed to download report {report['id']}")
         
         # Perform comprehensive patient history analysis
         analysis_result = await ai_analysis_service.analyze_patient_comprehensive_history(

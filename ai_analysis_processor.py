@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import os
 from dotenv import load_dotenv
+from async_file_downloader import file_downloader
 
 # Load environment variables
 load_dotenv()
@@ -24,6 +25,7 @@ class AIAnalysisProcessor:
         self.is_running = False
         self.process_interval = 10  # Check every 10 seconds
         self.max_concurrent = 10  # Process max 10 analyses concurrently
+        self.file_downloader = file_downloader  # Use global async downloader
         
         print("🔄 AI Analysis Processor initialized")
     
@@ -219,15 +221,21 @@ class AIAnalysisProcessor:
             await self.db.update_ai_analysis_queue_status(queue_id, "failed", error_msg)
     
     async def download_report_file(self, file_url: str) -> Optional[bytes]:
-        """Download a report file from the given URL"""
+        """Download a report file from the given URL using async non-blocking download"""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(file_url)
-                if response.status_code == 200:
-                    return response.content
-                else:
-                    print(f"❌ Failed to download file: HTTP {response.status_code}")
-                    return None
+            # Use the async file downloader instead of httpx directly
+            # This prevents blocking during large file downloads
+            file_content = await self.file_downloader.download_file(
+                url=file_url,
+                stream=True  # Use streaming for large files
+            )
+            
+            if file_content:
+                return file_content
+            else:
+                print(f"❌ Failed to download file from: {file_url}")
+                return None
+                
         except Exception as e:
             print(f"❌ Error downloading file: {e}")
             return None
