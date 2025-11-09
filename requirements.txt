@@ -18,7 +18,10 @@ python-decouple==3.8
 
 # HTTP requests and API
 requests==2.31.0
-httpx==0.24.1
+httpx[http2]==0.24.1
+h2==4.1.0
+hyperframe==6.0.1
+hpack==4.0.0
 
 # WhatsApp/SMS (Twilio)
 twilio==8.9.1
