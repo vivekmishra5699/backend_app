@@ -9,13 +9,19 @@ supabase==2.0.0
 psycopg2-binary==2.9.7
 
 # Authentication and security
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
+# Use pre-built cryptography wheels to avoid Rust compilation
+cryptography>=41.0.0
+python-jose==3.3.0
+bcrypt==4.0.1
+passlib==1.7.4
 python-decouple==3.8
 
 # HTTP requests and API
 requests==2.31.0
-httpx==0.24.1
+httpx[http2]==0.24.1
+h2==4.1.0
+hyperframe==6.0.1
+hpack==4.0.0
 
 # WhatsApp/SMS (Twilio)
 twilio==8.9.1

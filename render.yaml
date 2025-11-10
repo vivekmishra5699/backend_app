@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: backend-app
+    env: python
+    region: oregon
+    plan: free
+    branch: main
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: bash start.sh
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: PIP_NO_CACHE_DIR
+        value: 1

@@ -5217,7 +5217,7 @@ async def send_whatsapp_report_link(
             )
         
         # Generate the full upload URL
-        base_url = os.getenv("PUBLIC_BASE_URL", "https://retreat-incentives-cook-solutions.trycloudflare.com")
+        base_url = os.getenv("PUBLIC_BASE_URL", "https://backend-app-wwld.onrender.com")
         upload_url = f"{base_url.rstrip('/')}/upload-reports/{upload_token}"
         
         # Prepare response data

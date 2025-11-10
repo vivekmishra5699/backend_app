@@ -60,19 +60,30 @@ class ConnectionPoolManager:
             # Configure timeout
             timeout_config = httpx.Timeout(timeout)
             
-            # Create client with connection pooling
-            self._http_client = httpx.AsyncClient(
-                limits=limits,
-                timeout=timeout_config,
-                http2=True,  # Enable HTTP/2 for better performance
-                follow_redirects=True
-            )
+            # Try to enable HTTP/2, fallback to HTTP/1.1 if not available
+            http2_enabled = False
+            try:
+                self._http_client = httpx.AsyncClient(
+                    limits=limits,
+                    timeout=timeout_config,
+                    http2=True,  # Enable HTTP/2 for better performance
+                    follow_redirects=True
+                )
+                http2_enabled = True
+            except ImportError:
+                print("⚠️  HTTP/2 support not available, falling back to HTTP/1.1")
+                self._http_client = httpx.AsyncClient(
+                    limits=limits,
+                    timeout=timeout_config,
+                    http2=False,
+                    follow_redirects=True
+                )
             
             print(f"✅ HTTP Connection Pool created:")
             print(f"   - Max connections: {max_connections}")
             print(f"   - Keep-alive connections: {max_keepalive_connections}")
             print(f"   - Keep-alive expiry: {keepalive_expiry}s")
-            print(f"   - HTTP/2 enabled: True")
+            print(f"   - HTTP/2 enabled: {http2_enabled}")
         
         return self._http_client
     
