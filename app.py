@@ -3,8 +3,6 @@ from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, EmailStr, ValidationError, Field
 from datetime import datetime, timezone, timedelta, timedelta
 from typing import Optional, List, Dict, Any
@@ -100,9 +98,6 @@ async def lifespan(app: FastAPI):
         print("✅ Thread pool shut down successfully")
 
 app = FastAPI(title="Doctor App API", version="1.0.0", lifespan=lifespan)
-
-# Templates setup
-templates = Jinja2Templates(directory="templates")
 
 # CORS middleware for Flutter app
 app.add_middleware(
@@ -736,12 +731,6 @@ class LabContactUpdate(BaseModel):
 
 class LabLogin(BaseModel):
     phone: str
-
-class LabReportUpload(BaseModel):
-    visit_id: int
-    patient_name: str
-    report_type: str
-    test_name: str
 
 class LabReportRequest(BaseModel):
     id: int
@@ -3724,31 +3713,10 @@ async def root():
                 <h2>🔗 Quick Access Links</h2>
                 <div class="link-grid">
                     <div class="link-card">
-                        <h3>🧬 Lab Portal</h3>
-                        <p>Complete lab technician interface with login and dashboard</p>
-                        <a href="/lab" target="_blank">Lab Login Portal</a>
-                        <p><small>For lab technicians - no OTP required</small></p>
-                    </div>
-                    
-                    <div class="link-card">
-                        <h3>📋 Lab Dashboard (Direct)</h3>
-                        <p>Direct API access to lab dashboard</p>
-                        <a href="/lab-dashboard/8074743216" target="_blank">Sample Lab Dashboard</a>
-                        <p><small>Replace phone number in URL with actual lab phone</small></p>
-                    </div>
-                    
-                    <div class="link-card">
                         <h3>📊 API Documentation</h3>
                         <p>Interactive API documentation and testing</p>
                         <a href="/docs" target="_blank">Swagger UI</a>
                         <a href="/redoc" target="_blank">ReDoc</a>
-                    </div>
-                    
-                    <div class="link-card">
-                        <h3>🧪 Report Upload</h3>
-                        <p>Direct report upload interface for labs</p>
-                        <a href="/upload/sample-token" target="_blank">Upload Interface</a>
-                        <p><small>Replace 'sample-token' with actual report token</small></p>
                     </div>
                 </div>
             </div>
@@ -9917,50 +9885,6 @@ async def lab_login(lab_login: LabLogin):
             detail="Login failed"
         )
 
-@app.get("/lab-dashboard-ui/{phone}")
-async def get_lab_dashboard_ui(phone: str, request: Request):
-    """Lab dashboard web interface"""
-    try:
-        # Get lab contact info
-        lab_contact_info = await db.get_lab_contact_by_phone(phone)
-        if not lab_contact_info:
-            # Try to find lab based on profile data
-            doctors_with_lab = await db.get_doctors_by_lab_phone(phone)
-            if not doctors_with_lab:
-                raise HTTPException(status_code=404, detail="Lab contact not found")
-            
-            lab_contact_info = {
-                "phone": phone,
-                "lab_name": f"Lab ({phone})",
-                "lab_type": "pathology,radiology"
-            }
-        
-        # Get pending requests
-        requests = await db.get_lab_report_requests_by_phone(phone, "pending")
-        
-        # Calculate statistics
-        all_requests = await db.get_lab_report_requests_by_phone(phone)
-        stats = {
-            "total": len(all_requests),
-            "pending": len([r for r in all_requests if r.get("status") == "pending"]),
-            "completed": len([r for r in all_requests if r.get("status") == "completed"])
-        }
-        
-        return templates.TemplateResponse("lab_dashboard.html", {
-            "request": request,
-            "phone": phone,
-            "lab_info": lab_contact_info,  # Changed from lab_contact to lab_info to match template
-            "dashboard_data": {
-                "requests": requests,
-                "total_requests": stats["total"],
-                "pending_count": stats["pending"],
-                "completed_count": stats["completed"]
-            }
-        })
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Dashboard error: {str(e)}")
-
 @app.get("/lab-dashboard/{phone}")
 async def get_lab_dashboard(
     phone: str,
@@ -10021,64 +9945,6 @@ async def get_lab_dashboard(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get lab dashboard"
-        )
-
-@app.get("/lab")
-async def lab_portal(request: Request):
-    """Lab technician portal - login page"""
-    return templates.TemplateResponse("lab_login.html", {"request": request})
-
-@app.get("/lab-upload/{request_token}", response_class=HTMLResponse)
-async def lab_upload_page(request: Request, request_token: str):
-    """Display the lab report upload page"""
-    try:
-        # Get request details
-        request_data = await db.get_lab_report_request_by_token(request_token)
-        if not request_data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Upload request not found or expired"
-            )
-        
-        # Check if request has expired
-        expires_at = datetime.fromisoformat(request_data["expires_at"].replace('Z', '+00:00'))
-        if datetime.now(timezone.utc) > expires_at:
-            raise HTTPException(
-                status_code=status.HTTP_410_GONE,
-                detail="Upload request has expired"
-            )
-        
-        # Format data for template
-        patient = request_data.get("patients", {})
-        visit = request_data.get("visits", {})
-        doctor = request_data.get("doctor", {})
-        
-        formatted_data = {
-            "request_token": request_token,  # Add the token to the data
-            "patient_name": f"{patient.get('first_name', '')} {patient.get('last_name', '')}".strip(),
-            "patient_phone": patient.get("phone"),
-            "visit_date": visit.get("visit_date"),
-            "doctor_name": doctor.get("name") or f"{doctor.get('first_name', '')} {doctor.get('last_name', '')}".strip(),
-            "report_type": request_data.get("report_type"),
-            "test_name": request_data.get("test_name"),
-            "instructions": request_data.get("instructions"),
-            "status": request_data.get("status")
-        }
-        
-        return templates.TemplateResponse("lab_upload.html", {
-            "request": request,
-            "request_token": request_token,
-            "request_data": formatted_data
-        })
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error displaying lab upload page: {e}")
-        print(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to load upload page"
         )
 
 # Debug endpoint for testing file uploads
