@@ -17,9 +17,10 @@ import concurrent.futures
 class AIAnalysisService:
     def __init__(self):
         """Initialize the AI Analysis Service with Gemini 2.0 Flash"""
-        self.api_key = os.getenv("GEMINI_API_KEY")
+        # Try GOOGLE_API_KEY first (as per README), fallback to GEMINI_API_KEY for backward compatibility
+        self.api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not self.api_key:
-            raise ValueError("GEMINI_API_KEY not found in environment variables")
+            raise ValueError("GOOGLE_API_KEY not found in environment variables")
         
         # Configure Gemini
         genai.configure(api_key=self.api_key)
@@ -220,20 +221,41 @@ class AIAnalysisService:
         allergies = patient_context.get('allergies', 'None known')
         blood_group = patient_context.get('blood_group', 'Not specified')
         
-        # Extract visit information
+        # Extract visit information with more detail
         visit_date = visit_context.get('visit_date', 'Not specified')
+        visit_type = visit_context.get('visit_type', 'General consultation')
         chief_complaint = visit_context.get('chief_complaint', 'Not specified')
         symptoms = visit_context.get('symptoms', 'None specified')
         tests_recommended = visit_context.get('tests_recommended', 'General tests')
         diagnosis = visit_context.get('diagnosis', 'Pending')
         clinical_examination = visit_context.get('clinical_examination', 'Not documented')
+        treatment_plan = visit_context.get('treatment_plan', 'Not specified')
+        medications = visit_context.get('medications', 'None prescribed')
+        
+        # Extract vitals if available
+        vitals_text = "Not recorded"
+        if visit_context.get('vitals'):
+            vitals = visit_context.get('vitals', {})
+            vitals_parts = []
+            if vitals.get('blood_pressure'):
+                vitals_parts.append(f"BP: {vitals['blood_pressure']}")
+            if vitals.get('pulse'):
+                vitals_parts.append(f"Pulse: {vitals['pulse']} bpm")
+            if vitals.get('temperature'):
+                vitals_parts.append(f"Temp: {vitals['temperature']}°F")
+            if vitals.get('weight'):
+                vitals_parts.append(f"Weight: {vitals['weight']} kg")
+            if vitals.get('spo2'):
+                vitals_parts.append(f"SpO2: {vitals['spo2']}%")
+            if vitals_parts:
+                vitals_text = ", ".join(vitals_parts)
         
         # Extract doctor information
         doctor_name = f"Dr. {doctor_context.get('first_name', '')} {doctor_context.get('last_name', '')}"
         specialization = doctor_context.get('specialization', 'General Medicine')
         
         prompt = f"""
-You are an advanced AI medical assistant helping {doctor_name} ({specialization}) analyze a medical document. Please provide a comprehensive analysis of the attached document with the following context:
+You are an advanced AI medical assistant helping {doctor_name} ({specialization}) analyze a medical document within the context of a specific patient visit. This analysis should be DIRECTLY RELEVANT to the doctor's clinical observations and treatment decisions.
 
 **PATIENT INFORMATION:**
 - Name: {patient_name}
@@ -243,54 +265,95 @@ You are an advanced AI medical assistant helping {doctor_name} ({specialization}
 - Known Allergies: {allergies}
 - Medical History: {medical_history}
 
-**CURRENT VISIT CONTEXT:**
+**CURRENT VISIT CONTEXT (CRITICAL FOR ANALYSIS):**
 - Visit Date: {visit_date}
-- Chief Complaint: {chief_complaint}
-- Symptoms: {symptoms}
-- Clinical Examination: {clinical_examination}
-- Current Diagnosis: {diagnosis}
-- Tests Recommended: {tests_recommended}
+- Visit Type: {visit_type}
+- **Chief Complaint:** {chief_complaint}
+- **Presenting Symptoms:** {symptoms}
+- **Vitals Recorded:** {vitals_text}
+- **Clinical Examination Findings:** {clinical_examination}
+- **Doctor's Working Diagnosis:** {diagnosis}
+- **Tests Recommended by Doctor:** {tests_recommended}
+- **Treatment Plan:** {treatment_plan}
+- **Medications Prescribed:** {medications}
 
 **DOCUMENT TO ANALYZE:**
 - File Name: {file_name}
 
-Please provide a detailed analysis in the following structured format:
+**ANALYSIS INSTRUCTIONS:**
 
-**1. DOCUMENT SUMMARY:**
-- Type of medical document (lab report, imaging, prescription, etc.)
-- Key findings and values
-- Date of the test/document (if available)
+Your analysis MUST be contextual and personalized. This is not a standalone report analysis - it's an analysis to help the doctor validate their clinical decisions and adjust treatment if needed.
 
-**2. CLINICAL SIGNIFICANCE:**
-- Normal vs abnormal findings
-- Reference ranges and interpretations
-- Critical values that need immediate attention
+Please provide analysis in this ENHANCED format:
 
-**3. CORRELATION WITH PATIENT CONTEXT:**
-- How findings relate to the patient's chief complaint
-- Relevance to current symptoms
-- Connection to medical history and current diagnosis
+**1. DOCUMENT IDENTIFICATION & SUMMARY:**
+- Type of medical document (CBC, LFT, X-Ray, CT scan, etc.)
+- Date of test/report (if available)
+- Key parameters measured and their values
+- Overall quality of the document
 
-**4. ACTIONABLE INSIGHTS:**
-- Immediate actions required (if any)
-- Follow-up recommendations
-- Additional tests that might be needed
-- Treatment considerations
+**2. CLINICAL CORRELATION WITH VISIT:**
+⚠️ **MOST IMPORTANT SECTION** - This should be the most detailed part.
+- **Direct Relevance to Chief Complaint:** How do the report findings specifically relate to "{chief_complaint}"?
+- **Validation of Clinical Examination:** Do the report findings support or contradict Dr. {doctor_name}'s examination findings of: "{clinical_examination}"?
+- **Support for Working Diagnosis:** How do these results confirm, refute, or modify the diagnosis of "{diagnosis}"?
+- **Explanation of Symptoms:** Which findings in this report could explain the patient's symptoms: "{symptoms}"?
+- **Appropriateness of Test:** Was this the right test to order given the presentation? Are the results what you'd expect?
 
-**5. CLINICAL NOTES:**
-- Important observations for medical records
-- Trends or patterns noted
-- Quality of the document/test
+**3. DETAILED FINDINGS ANALYSIS:**
+For each significant parameter/finding:
+- **Value found** vs **Normal reference range**
+- **Clinical significance** in general medical context
+- **Specific relevance** to this patient's age ({patient_age}), gender ({patient_gender}), and medical history
+- **Severity assessment** (normal, borderline, mildly abnormal, significantly abnormal, critical)
+- **Trends** if previous values are mentioned in medical history
 
-**IMPORTANT GUIDELINES:**
-- Focus on medically relevant information
-- Highlight any critical or abnormal findings
-- Consider the patient's specific context and history
-- Provide actionable insights for clinical decision-making
-- Be thorough but concise
-- If uncertain about any finding, clearly state the limitation
+**4. CRITICAL & URGENT FINDINGS:**
+🚨 Flag any values that require:
+- Immediate medical attention
+- Urgent follow-up within 24-48 hours
+- Careful monitoring
+- Medication adjustments
 
-Please analyze the document thoroughly and provide insights that will help Dr. {doctor_name} make informed clinical decisions for {patient_name}.
+**5. TREATMENT PLAN EVALUATION:**
+Given the current treatment plan: "{treatment_plan}" and medications: "{medications}"
+- Are the test results consistent with continuing this treatment?
+- Do findings suggest need for treatment modification?
+- Are there any contraindications revealed by this report?
+- Should any medications be adjusted based on these findings?
+
+**6. ACTIONABLE NEXT STEPS:**
+Based on BOTH the report findings AND the visit context:
+- Immediate actions for Dr. {doctor_name} to consider
+- Follow-up tests recommended (with justification)
+- Specialist referrals if indicated
+- Patient lifestyle modifications
+- Monitoring schedule recommendations
+
+**7. PATIENT COMMUNICATION GUIDANCE:**
+- How should Dr. {doctor_name} explain these results to {patient_name}?
+- Key points to emphasize during patient consultation
+- Reassurance points if results are normal/mild
+- Concerns to discuss if results are abnormal
+- Simple, non-technical explanation of findings
+
+**8. CLINICAL DOCUMENTATION NOTES:**
+- Important observations to add to medical records
+- Trends to monitor in future visits
+- Red flags for future reference
+- Quality/limitations of this test
+
+**CRITICAL ANALYSIS PRINCIPLES:**
+✓ Always connect findings back to the chief complaint and symptoms
+✓ Consider the doctor's working diagnosis in your interpretation
+✓ Think about "why did the doctor order this test?" and answer that question
+✓ Be specific about clinical implications, not just lab values
+✓ Prioritize findings that impact immediate patient management
+✓ Consider the complete clinical picture, not isolated lab values
+✓ Flag discrepancies between clinical findings and lab results
+✓ Provide decision support, not just data interpretation
+
+This analysis should help Dr. {doctor_name} provide better care for {patient_name} by connecting the diagnostic data with the clinical presentation and treatment plan.
 """
         
         return prompt
@@ -317,67 +380,106 @@ Please analyze the document thoroughly and provide insights that will help Dr. {
     async def _perform_gemini_analysis(
         self, 
         prompt: str, 
-        document_data: Dict[str, Any]
+        document_data: Dict[str, Any],
+        max_retries: int = 3
     ) -> Dict[str, Any]:
-        """Perform the actual AI analysis using Gemini"""
-        try:
-            loop = asyncio.get_event_loop()
-            
-            # Prepare content for Gemini
-            if document_data["type"] == "text":
-                content = [prompt, document_data["content"]]
-            elif document_data["type"] == "image":
-                # Create image object for Gemini
-                image_part = {
-                    "mime_type": document_data["mime_type"],
-                    "data": document_data["content"]
-                }
-                content = [prompt, image_part]
-            else:
-                # For PDF or other types, include as text if possible
-                content = [prompt, f"Document content: {document_data.get('content', 'Unable to extract content')}"]
-            
-            # Generate response using Gemini
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.model.generate_content(content)
-            )
-            
-            if response and response.text:
-                analysis_text = response.text
+        """Perform the actual AI analysis using Gemini with retry logic for rate limits"""
+        
+        for attempt in range(max_retries):
+            try:
+                loop = asyncio.get_event_loop()
                 
-                # Parse the structured response
-                parsed_analysis = self._parse_analysis_response(analysis_text)
+                # Prepare content for Gemini
+                if document_data["type"] == "text":
+                    content = [prompt, document_data["content"]]
+                elif document_data["type"] == "image":
+                    # Create image object for Gemini
+                    image_part = {
+                        "mime_type": document_data["mime_type"],
+                        "data": document_data["content"]
+                    }
+                    content = [prompt, image_part]
+                else:
+                    # For PDF or other types, include as text if possible
+                    content = [prompt, f"Document content: {document_data.get('content', 'Unable to extract content')}"]
                 
-                return {
-                    "raw_analysis": analysis_text,
-                    "structured_analysis": parsed_analysis,
-                    "confidence_score": self._calculate_confidence(analysis_text),
-                    "analysis_length": len(analysis_text),
-                    "key_findings": self._extract_key_findings(parsed_analysis)
-                }
-            else:
-                return {
-                    "error": "No response from AI model",
-                    "raw_analysis": "",
-                    "structured_analysis": {},
-                    "confidence_score": 0.0
-                }
+                # Generate response using Gemini
+                response = await loop.run_in_executor(
+                    self.executor,
+                    lambda: self.model.generate_content(content)
+                )
                 
-        except Exception as e:
-            print(f"Error in Gemini analysis: {e}")
-            return {
-                "error": str(e),
-                "raw_analysis": "",
-                "structured_analysis": {},
-                "confidence_score": 0.0
-            }
+                if response and response.text:
+                    analysis_text = response.text
+                    
+                    # Parse the structured response
+                    parsed_analysis = self._parse_analysis_response(analysis_text)
+                    
+                    return {
+                        "raw_analysis": analysis_text,
+                        "structured_analysis": parsed_analysis,
+                        "confidence_score": self._calculate_confidence(analysis_text),
+                        "analysis_length": len(analysis_text),
+                        "key_findings": self._extract_key_findings(parsed_analysis)
+                    }
+                else:
+                    return {
+                        "error": "No response from AI model",
+                        "raw_analysis": "",
+                        "structured_analysis": {},
+                        "confidence_score": 0.0,
+                        "key_findings": []
+                    }
+                    
+            except Exception as e:
+                error_message = str(e)
+                
+                # Check if it's a rate limit error (429)
+                if "429" in error_message or "Resource exhausted" in error_message:
+                    if attempt < max_retries - 1:
+                        # Exponential backoff: 2, 4, 8 seconds
+                        wait_time = 2 ** (attempt + 1)
+                        print(f"⚠️ Rate limit hit. Retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"❌ Rate limit exceeded after {max_retries} attempts")
+                        return {
+                            "error": "Rate limit exceeded. Please try again later.",
+                            "raw_analysis": "",
+                            "structured_analysis": {},
+                            "confidence_score": 0.0,
+                            "key_findings": []
+                        }
+                else:
+                    # Other errors - don't retry
+                    print(f"Error in Gemini analysis: {e}")
+                    return {
+                        "error": error_message,
+                        "raw_analysis": "",
+                        "structured_analysis": {},
+                        "confidence_score": 0.0,
+                        "key_findings": []
+                    }
+        
+        # Should never reach here, but just in case
+        return {
+            "error": "Analysis failed after retries",
+            "raw_analysis": "",
+            "structured_analysis": {},
+            "confidence_score": 0.0,
+            "key_findings": []
+        }
     
     def _parse_analysis_response(self, analysis_text: str) -> Dict[str, Any]:
         """Parse the structured analysis response from Gemini"""
         try:
             sections = {
                 "document_summary": "",
+                "clinical_correlation": "",
+                "detailed_findings": "",
+                "critical_findings": "",
+                "treatment_evaluation": "",
                 "clinical_significance": "",
                 "correlation_with_patient": "",
                 "actionable_insights": "",
@@ -392,25 +494,35 @@ Please analyze the document thoroughly and provide insights that will help Dr. {
             for line in lines:
                 line = line.strip()
                 
-                # Check for section headers
-                if "DOCUMENT SUMMARY" in line.upper():
+                # Check for section headers (enhanced to match new format)
+                if "DOCUMENT IDENTIFICATION" in line.upper() or "DOCUMENT SUMMARY" in line.upper():
                     current_section = "document_summary"
+                elif "CLINICAL CORRELATION WITH VISIT" in line.upper() or "CORRELATION WITH VISIT" in line.upper():
+                    current_section = "clinical_correlation"
+                elif "DETAILED FINDINGS" in line.upper():
+                    current_section = "detailed_findings"
+                elif "CRITICAL" in line.upper() and "URGENT" in line.upper():
+                    current_section = "critical_findings"
+                elif "TREATMENT PLAN EVALUATION" in line.upper():
+                    current_section = "treatment_evaluation"
                 elif "CLINICAL SIGNIFICANCE" in line.upper():
                     current_section = "clinical_significance"
                 elif "CORRELATION WITH PATIENT" in line.upper():
                     current_section = "correlation_with_patient"
-                elif "ACTIONABLE INSIGHTS" in line.upper():
+                elif "ACTIONABLE" in line.upper() or "NEXT STEPS" in line.upper():
                     current_section = "actionable_insights"
                 elif "PATIENT COMMUNICATION" in line.upper():
                     current_section = "patient_communication"
-                elif "CLINICAL NOTES" in line.upper():
+                elif "CLINICAL" in line.upper() and ("NOTES" in line.upper() or "DOCUMENTATION" in line.upper()):
                     current_section = "clinical_notes"
-                elif line and current_section and not line.startswith('**'):
-                    # Add content to current section
-                    if sections[current_section]:
-                        sections[current_section] += " " + line
-                    else:
-                        sections[current_section] = line
+                elif line and current_section and not line.startswith('**') and not line.startswith('⚠️') and not line.startswith('🚨'):
+                    # Add content to current section (skip emoji markers)
+                    clean_line = line.lstrip('✓-•*')
+                    if clean_line:
+                        if sections[current_section]:
+                            sections[current_section] += " " + clean_line
+                        else:
+                            sections[current_section] = clean_line
             
             return sections
             
@@ -418,6 +530,10 @@ Please analyze the document thoroughly and provide insights that will help Dr. {
             print(f"Error parsing analysis response: {e}")
             return {
                 "document_summary": analysis_text[:500] + "..." if len(analysis_text) > 500 else analysis_text,
+                "clinical_correlation": "",
+                "detailed_findings": "",
+                "critical_findings": "",
+                "treatment_evaluation": "",
                 "clinical_significance": "",
                 "correlation_with_patient": "",
                 "actionable_insights": "",

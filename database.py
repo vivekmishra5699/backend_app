@@ -3,22 +3,29 @@ from typing import Optional, List, Dict, Any
 import traceback
 import asyncio
 from datetime import datetime, timezone
-import concurrent.futures
-from query_cache import QueryCache, cached
+from thread_pool_manager import get_executor
+from optimized_cache import optimized_cache
 
 class DatabaseManager:
     def __init__(self, supabase_client: Client, enable_cache: bool = True):
         self.supabase = supabase_client
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=50)
-        # Initialize cache with LRU eviction: max 1000 entries, 100MB memory, 5 min TTL
-        self.cache = QueryCache(default_ttl=300, max_size=1000, max_memory_mb=100) if enable_cache else None
+        # Use unified thread pool instead of creating a new one
+        self.executor = get_executor()
+        self.cache = optimized_cache if enable_cache else None
         if self.cache:
-            print("✅ Query cache enabled with LRU eviction (TTL: 5 min, Max: 1000 entries, 100MB)")
+            print("✅ Optimized query cache enabled (5000 entries, 200MB)")
     
     # Doctor related operations
     async def get_doctor_by_firebase_uid(self, firebase_uid: str) -> Optional[Dict[str, Any]]:
         """Get doctor by Firebase UID (CACHED)"""
         try:
+            # Check cache first
+            if self.cache:
+                cache_key = f"doctor_uid:{firebase_uid}"
+                cached_result = await self.cache.get(cache_key)
+                if cached_result is not None:
+                    return cached_result
+            
             print(f"Fetching doctor by Firebase UID: {firebase_uid}")
             
             # Run the synchronous Supabase call in a thread pool
@@ -29,9 +36,14 @@ class DatabaseManager:
             )
             print(f"Supabase response for UID lookup: {response}")
             
-            if response.data:
-                return response.data[0]
-            return None
+            result = response.data[0] if response.data else None
+            
+            # Cache result
+            if self.cache and result:
+                cache_key = f"doctor_uid:{firebase_uid}"
+                await self.cache.set(cache_key, result, ttl=600)  # Cache for 10 minutes
+            
+            return result
         except Exception as e:
             print(f"Error fetching doctor by Firebase UID: {e}")
             print(f"Traceback: {traceback.format_exc()}")
@@ -139,6 +151,25 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error fetching patient by ID: {e}")
             print(f"Traceback: {traceback.format_exc()}")
+            return None
+
+    async def get_patient_by_id_unrestricted(self, patient_id: int) -> Optional[Dict[str, Any]]:
+        """Get patient by ID without doctor scoping (for pharmacy views)."""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("patients")
+                .select("*")
+                .eq("id", patient_id)
+                .limit(1)
+                .execute()
+            )
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error fetching patient by ID (unrestricted): {e}")
             return None
 
     async def get_all_patients_for_doctor(self, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
@@ -637,153 +668,6 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error deleting AI analyses for visit: {e}")
             return 0
-
-    # Batch Query Operations (to prevent N+1 queries)
-    async def get_visits_batch_by_patient_ids(self, patient_ids: List[int], doctor_firebase_uid: str) -> Dict[int, List[Dict[str, Any]]]:
-        """
-        Get visits for multiple patients in a single query (prevents N+1)
-        Returns: Dict mapping patient_id -> list of visits
-        """
-        try:
-            if not patient_ids:
-                return {}
-            
-            print(f"Batch fetching visits for {len(patient_ids)} patients")
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("visits")
-                .select("*")
-                .eq("doctor_firebase_uid", doctor_firebase_uid)
-                .in_("patient_id", patient_ids)
-                .order("visit_date", desc=True)
-                .execute()
-            )
-            
-            # Group visits by patient_id
-            visits_by_patient = {}
-            if response.data:
-                for visit in response.data:
-                    patient_id = visit["patient_id"]
-                    if patient_id not in visits_by_patient:
-                        visits_by_patient[patient_id] = []
-                    visits_by_patient[patient_id].append(visit)
-            
-            print(f"Batch loaded visits for {len(visits_by_patient)} patients ({len(response.data if response.data else [])} total visits)")
-            return visits_by_patient
-            
-        except Exception as e:
-            print(f"Error batch fetching visits: {e}")
-            print(f"Traceback: {traceback.format_exc()}")
-            return {}
-
-    async def get_reports_batch_by_patient_ids(self, patient_ids: List[int], doctor_firebase_uid: str) -> Dict[int, List[Dict[str, Any]]]:
-        """
-        Get reports for multiple patients in a single query (prevents N+1)
-        Returns: Dict mapping patient_id -> list of reports
-        """
-        try:
-            if not patient_ids:
-                return {}
-            
-            print(f"Batch fetching reports for {len(patient_ids)} patients")
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("reports")
-                .select("*")
-                .eq("doctor_firebase_uid", doctor_firebase_uid)
-                .in_("patient_id", patient_ids)
-                .order("uploaded_at", desc=True)
-                .execute()
-            )
-            
-            # Group reports by patient_id
-            reports_by_patient = {}
-            if response.data:
-                for report in response.data:
-                    patient_id = report["patient_id"]
-                    if patient_id not in reports_by_patient:
-                        reports_by_patient[patient_id] = []
-                    reports_by_patient[patient_id].append(report)
-            
-            print(f"Batch loaded reports for {len(reports_by_patient)} patients ({len(response.data if response.data else [])} total reports)")
-            return reports_by_patient
-            
-        except Exception as e:
-            print(f"Error batch fetching reports: {e}")
-            print(f"Traceback: {traceback.format_exc()}")
-            return {}
-
-    async def get_analyses_batch_by_patient_ids(self, patient_ids: List[int], doctor_firebase_uid: str) -> Dict[int, List[Dict[str, Any]]]:
-        """
-        Get patient history analyses for multiple patients in a single query (prevents N+1)
-        Returns: Dict mapping patient_id -> list of analyses
-        """
-        try:
-            if not patient_ids:
-                return {}
-            
-            print(f"Batch fetching analyses for {len(patient_ids)} patients")
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("patient_history_analyses")
-                .select("*")
-                .eq("doctor_firebase_uid", doctor_firebase_uid)
-                .in_("patient_id", patient_ids)
-                .order("analysis_date", desc=True)
-                .execute()
-            )
-            
-            # Group analyses by patient_id
-            analyses_by_patient = {}
-            if response.data:
-                for analysis in response.data:
-                    patient_id = analysis["patient_id"]
-                    if patient_id not in analyses_by_patient:
-                        analyses_by_patient[patient_id] = []
-                    analyses_by_patient[patient_id].append(analysis)
-            
-            print(f"Batch loaded analyses for {len(analyses_by_patient)} patients ({len(response.data if response.data else [])} total analyses)")
-            return analyses_by_patient
-            
-        except Exception as e:
-            print(f"Error batch fetching analyses: {e}")
-            print(f"Traceback: {traceback.format_exc()}")
-            return {}
-
-    async def count_visits_and_reports_batch(self, patient_ids: List[int], doctor_firebase_uid: str) -> Dict[int, Dict[str, int]]:
-        """
-        Get visit and report counts for multiple patients efficiently (prevents N+1)
-        Returns: Dict mapping patient_id -> {"visit_count": int, "report_count": int}
-        """
-        try:
-            if not patient_ids:
-                return {}
-            
-            print(f"Batch counting visits and reports for {len(patient_ids)} patients")
-            
-            # Get all visits and reports in parallel
-            visits_dict, reports_dict = await asyncio.gather(
-                self.get_visits_batch_by_patient_ids(patient_ids, doctor_firebase_uid),
-                self.get_reports_batch_by_patient_ids(patient_ids, doctor_firebase_uid)
-            )
-            
-            # Count for each patient
-            counts = {}
-            for patient_id in patient_ids:
-                counts[patient_id] = {
-                    "visit_count": len(visits_dict.get(patient_id, [])),
-                    "report_count": len(reports_dict.get(patient_id, []))
-                }
-            
-            return counts
-            
-        except Exception as e:
-            print(f"Error batch counting: {e}")
-            print(f"Traceback: {traceback.format_exc()}")
-            return {}
 
     def __del__(self):
         """Cleanup thread pool executor"""
@@ -1302,16 +1186,27 @@ class DatabaseManager:
     async def create_patient_history_analysis(self, analysis_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Create a new patient history analysis record"""
         try:
+            print(f"🔍 Database: Inserting patient history analysis...")
+            print(f"   Patient ID: {analysis_data.get('patient_id')}")
+            print(f"   Doctor UID: {analysis_data.get('doctor_firebase_uid')}")
+            print(f"   Raw analysis length: {len(analysis_data.get('raw_analysis', ''))}")
+            
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(
                 self.executor, 
                 lambda: self.supabase.table("patient_history_analysis").insert(analysis_data).execute()
             )
+            
+            print(f"📦 Supabase response: data={bool(response.data)}, count={getattr(response, 'count', None)}")
+            
             if response.data:
+                print(f"✅ Successfully inserted analysis with ID: {response.data[0].get('id')}")
                 return response.data[0]
-            return None
+            else:
+                print(f"❌ No data returned from insert operation")
+                return None
         except Exception as e:
-            print(f"Error creating patient history analysis: {e}")
+            print(f"❌ Error creating patient history analysis: {e}")
             print(f"Traceback: {traceback.format_exc()}")
             return None
 
@@ -1437,38 +1332,29 @@ class DatabaseManager:
         """
         Clean up all outdated patient history analyses for a doctor.
         This can be run periodically to ensure data consistency.
-        OPTIMIZED: Uses batch queries to prevent N+1 queries.
         """
         try:
             print(f"Starting cleanup of all outdated patient history analyses for doctor {doctor_firebase_uid}")
             
             # Get all patients for this doctor
             patients = await self.get_all_patients_for_doctor(doctor_firebase_uid)
-            if not patients:
-                print("No patients found")
-                return True
             
-            patient_ids = [p["id"] for p in patients]
-            print(f"Processing {len(patients)} patients")
-            
-            # BATCH QUERY: Get visits, reports, and analyses for all patients at once
-            print("Fetching visits, reports, and analyses in batch...")
-            visits_dict, reports_dict, analyses_dict = await asyncio.gather(
-                self.get_visits_batch_by_patient_ids(patient_ids, doctor_firebase_uid),
-                self.get_reports_batch_by_patient_ids(patient_ids, doctor_firebase_uid),
-                self.get_analyses_batch_by_patient_ids(patient_ids, doctor_firebase_uid)
-            )
-            
-            # Process each patient with pre-fetched data
             total_cleaned = 0
             for patient in patients:
                 patient_id = patient["id"]
                 patient_name = f"{patient['first_name']} {patient['last_name']}"
                 
-                # Get counts from batch-fetched data
-                current_visit_count = len(visits_dict.get(patient_id, []))
-                current_report_count = len(reports_dict.get(patient_id, []))
-                analyses = analyses_dict.get(patient_id, [])
+                print(f"Checking patient {patient_id} ({patient_name})...")
+                
+                # Get current visit and report counts
+                visits = await self.get_visits_by_patient_id(patient_id, doctor_firebase_uid)
+                reports = await self.get_reports_by_patient_id(patient_id, doctor_firebase_uid)
+                
+                current_visit_count = len(visits) if visits else 0
+                current_report_count = len(reports) if reports else 0
+                
+                # Get all existing analyses for this patient
+                analyses = await self.get_patient_history_analyses(patient_id, doctor_firebase_uid)
                 
                 patient_outdated = 0
                 for analysis in analyses:
@@ -1478,16 +1364,17 @@ class DatabaseManager:
                     # Check if the analysis is outdated
                     if (stored_visit_count != current_visit_count or 
                         stored_report_count != current_report_count):
-                        print(f"  Deleting outdated analysis {analysis['id']} for {patient_name}: visits {stored_visit_count}->{current_visit_count}, reports {stored_report_count}->{current_report_count}")
+                        print(f"  Deleting outdated analysis {analysis['id']}: visits {stored_visit_count}->{current_visit_count}, reports {stored_report_count}->{current_report_count}")
                         await self.delete_patient_history_analysis(analysis["id"], doctor_firebase_uid)
                         patient_outdated += 1
                         total_cleaned += 1
                 
                 if patient_outdated > 0:
-                    print(f"  ✓ Cleaned {patient_outdated} outdated analyses for {patient_name}")
+                    print(f"  Cleaned up {patient_outdated} outdated analyses for patient {patient_name}")
+                else:
+                    print(f"  No outdated analyses found for patient {patient_name}")
             
-            print(f"✅ Cleanup completed. Total outdated analyses cleaned: {total_cleaned}")
-            print(f"   Performance: Used 3 batch queries instead of {len(patients) * 2} individual queries")
+            print(f"Cleanup completed. Total outdated analyses cleaned: {total_cleaned}")
             return True
             
         except Exception as e:
@@ -2519,8 +2406,445 @@ class DatabaseManager:
             print(f"Error deactivating frontdesk user: {e}")
             return False
 
+    # Pharmacy Management Methods
+    async def create_pharmacy_user(self, pharmacy_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Create a new pharmacy user record"""
+        try:
+            print(f"Inserting pharmacy user data to Supabase: {pharmacy_data}")
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_users").insert(pharmacy_data).execute()
+            )
+            print(f"Supabase pharmacy insert response: {response}")
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error creating pharmacy user: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return None
+
+    async def get_pharmacy_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        """Get pharmacy user by username"""
+        try:
+            print(f"Fetching pharmacy user by username: {username}")
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_users")
+                .select("*")
+                .eq("username", username)
+                .eq("is_active", True)
+                .execute()
+            )
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error fetching pharmacy user by username: {e}")
+            return None
+
+    async def get_pharmacy_user_by_id(self, pharmacy_id: int) -> Optional[Dict[str, Any]]:
+        """Get pharmacy user by ID"""
+        try:
+            print(f"Fetching pharmacy user by ID: {pharmacy_id}")
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_users")
+                .select("*")
+                .eq("id", pharmacy_id)
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error fetching pharmacy user by ID: {e}")
+            return None
+
+    async def update_pharmacy_user(self, pharmacy_id: int, update_data: Dict[str, Any]) -> bool:
+        """Update pharmacy user profile"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_users")
+                .update(update_data)
+                .eq("id", pharmacy_id)
+                .execute()
+            )
+            return bool(response.data)
+        except Exception as e:
+            print(f"Error updating pharmacy user: {e}")
+            return False
+
+    async def get_pharmacy_users_by_hospital(self, hospital_name: str) -> List[Dict[str, Any]]:
+        """Get all active pharmacy users for a hospital"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_users")
+                .select("*")
+                .eq("hospital_name", hospital_name)
+                .eq("is_active", True)
+                .order("created_at", desc=False)
+                .execute()
+            )
+            return response.data if response.data else []
+        except Exception as e:
+            print(f"Error fetching pharmacy users by hospital: {e}")
+            return []
+
+    async def create_pharmacy_inventory_item(self, item_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Create a new pharmacy inventory item"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_inventory").insert(item_data).execute()
+            )
+            if response.data:
+                inserted = response.data[0]
+                item_id = inserted.get("id")
+                pharmacy_id = inserted.get("pharmacy_id") or item_data.get("pharmacy_id")
+                if item_id and pharmacy_id:
+                    return await self.get_pharmacy_inventory_item_by_id(pharmacy_id, item_id)
+                return inserted
+            return None
+        except Exception as e:
+            print(f"Error creating pharmacy inventory item: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return None
+
+    async def get_pharmacy_inventory_item_by_id(self, pharmacy_id: int, item_id: int) -> Optional[Dict[str, Any]]:
+        """Get a specific inventory item by ID"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_inventory")
+                .select("*, supplier:pharmacy_suppliers!left(id,name,contact_person,phone,email)")
+                .eq("id", item_id)
+                .eq("pharmacy_id", pharmacy_id)
+                .limit(1)
+                .execute()
+            )
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error fetching pharmacy inventory item by ID: {e}")
+            return None
+
+    async def get_pharmacy_inventory_items(self, pharmacy_id: int) -> List[Dict[str, Any]]:
+        """Get all inventory items for a pharmacy"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_inventory")
+                .select("*, supplier:pharmacy_suppliers!left(id,name,contact_person,phone,email)")
+                .eq("pharmacy_id", pharmacy_id)
+                .order("medicine_name", desc=False)
+                .execute()
+            )
+            return response.data if response.data else []
+        except Exception as e:
+            print(f"Error fetching pharmacy inventory items: {e}")
+            return []
+
+    async def update_pharmacy_inventory_item(self, pharmacy_id: int, item_id: int, update_data: Dict[str, Any]) -> bool:
+        """Update a pharmacy inventory item"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_inventory")
+                .update(update_data)
+                .eq("id", item_id)
+                .eq("pharmacy_id", pharmacy_id)
+                .execute()
+            )
+            return bool(response.data)
+        except Exception as e:
+            print(f"Error updating pharmacy inventory item: {e}")
+            return False
+
+    async def adjust_pharmacy_inventory_stock(self, pharmacy_id: int, item_id: int, quantity_delta: int) -> Optional[Dict[str, Any]]:
+        """Adjust stock quantity for an inventory item"""
+        try:
+            item = await self.get_pharmacy_inventory_item_by_id(pharmacy_id, item_id)
+            if not item:
+                return None
+            current_qty = item.get("stock_quantity", 0) or 0
+            new_qty = current_qty + quantity_delta
+            if new_qty < 0:
+                new_qty = 0
+            update_data = {
+                "stock_quantity": new_qty,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+            success = await self.update_pharmacy_inventory_item(pharmacy_id, item_id, update_data)
+            if success:
+                return await self.get_pharmacy_inventory_item_by_id(pharmacy_id, item_id)
+            return None
+        except Exception as e:
+            print(f"Error adjusting pharmacy inventory stock: {e}")
+            return None
+
+    async def create_pharmacy_prescription(self, prescription_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Create a pharmacy prescription entry"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_prescriptions").insert(prescription_data).execute()
+            )
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error creating pharmacy prescription: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return None
+
+    async def get_pharmacy_prescription_by_id(self, prescription_id: int) -> Optional[Dict[str, Any]]:
+        """Get pharmacy prescription by ID"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_prescriptions")
+                .select("*")
+                .eq("id", prescription_id)
+                .limit(1)
+                .execute()
+            )
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error fetching pharmacy prescription by ID: {e}")
+            return None
+
+    async def get_pharmacy_prescription_by_visit(self, visit_id: int) -> Optional[Dict[str, Any]]:
+        """Get pharmacy prescription by visit ID"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_prescriptions")
+                .select("*")
+                .eq("visit_id", visit_id)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error fetching pharmacy prescription by visit: {e}")
+            return None
+
+    async def get_pharmacy_prescriptions(self, hospital_name: str, pharmacy_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Get pharmacy prescriptions for a hospital (optionally filtered by pharmacy)"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_prescriptions")
+                .select("*")
+                .eq("hospital_name", hospital_name)
+                .order("created_at", desc=True)
+                .execute()
+            )
+            prescriptions = response.data if response.data else []
+            if pharmacy_id is not None:
+                filtered = []
+                for prescription in prescriptions:
+                    if prescription.get("pharmacy_id") is None or prescription.get("pharmacy_id") == pharmacy_id:
+                        filtered.append(prescription)
+                prescriptions = filtered
+            return prescriptions
+        except Exception as e:
+            print(f"Error fetching pharmacy prescriptions: {e}")
+            return []
+
+    async def update_pharmacy_prescription(self, prescription_id: int, update_data: Dict[str, Any]) -> bool:
+        """Update pharmacy prescription"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_prescriptions")
+                .update(update_data)
+                .eq("id", prescription_id)
+                .execute()
+            )
+            return bool(response.data)
+        except Exception as e:
+            print(f"Error updating pharmacy prescription: {e}")
+            return False
+
+    async def create_pharmacy_invoice(self, invoice_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Create a pharmacy invoice"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_invoices").insert(invoice_data).execute()
+            )
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error creating pharmacy invoice: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return None
+
+    async def get_pharmacy_invoices_by_pharmacy(self, pharmacy_id: int) -> List[Dict[str, Any]]:
+        """Get invoices for a pharmacy"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_invoices")
+                .select("*")
+                .eq("pharmacy_id", pharmacy_id)
+                .order("generated_at", desc=True)
+                .execute()
+            )
+            return response.data if response.data else []
+        except Exception as e:
+            print(f"Error fetching pharmacy invoices: {e}")
+            return []
+
+    async def get_pharmacy_invoice_summary(self, pharmacy_id: int, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict[str, Any]:
+        """Get aggregated invoice summary for a pharmacy"""
+        try:
+            invoices = await self.get_pharmacy_invoices_by_pharmacy(pharmacy_id)
+            if start_date or end_date:
+                filtered = []
+                for invoice in invoices:
+                    generated_at = invoice.get("generated_at")
+                    if not generated_at:
+                        continue
+                    date_str = generated_at[:10]
+                    if start_date and date_str < start_date:
+                        continue
+                    if end_date and date_str > end_date:
+                        continue
+                    filtered.append(invoice)
+                invoices = filtered
+
+            total_sales = 0.0
+            total_paid = 0.0
+            pending_amount = 0.0
+            paid_invoices = 0
+            for invoice in invoices:
+                amount = float(invoice.get("total_amount", 0) or 0)
+                total_sales += amount
+                status = invoice.get("status", "unpaid")
+                if status == "paid":
+                    total_paid += amount
+                    paid_invoices += 1
+                else:
+                    pending_amount += amount
+
+            return {
+                "invoice_count": len(invoices),
+                "total_sales": round(total_sales, 2),
+                "total_paid": round(total_paid, 2),
+                "pending_amount": round(pending_amount, 2),
+                "paid_invoices": paid_invoices
+            }
+        except Exception as e:
+            print(f"Error generating pharmacy invoice summary: {e}")
+            return {
+                "invoice_count": 0,
+                "total_sales": 0.0,
+                "total_paid": 0.0,
+                "pending_amount": 0.0,
+                "paid_invoices": 0
+            }
+
+    async def get_pharmacy_suppliers(self, pharmacy_id: int) -> List[Dict[str, Any]]:
+        """Get all suppliers for a pharmacy"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_suppliers")
+                .select("*")
+                .eq("pharmacy_id", pharmacy_id)
+                .order("name", desc=False)
+                .execute()
+            )
+            return response.data if response.data else []
+        except Exception as e:
+            print(f"Error fetching pharmacy suppliers: {e}")
+            return []
+
+    async def get_pharmacy_supplier_by_id(self, pharmacy_id: int, supplier_id: int) -> Optional[Dict[str, Any]]:
+        """Get a supplier record by ID"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_suppliers")
+                .select("*")
+                .eq("pharmacy_id", pharmacy_id)
+                .eq("id", supplier_id)
+                .limit(1)
+                .execute()
+            )
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error fetching pharmacy supplier by ID: {e}")
+            return None
+
+    async def create_pharmacy_supplier(self, supplier_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Create a new pharmacy supplier"""
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_suppliers").insert(supplier_data).execute()
+            )
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error creating pharmacy supplier: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return None
+
+    async def update_pharmacy_supplier(self, pharmacy_id: int, supplier_id: int, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Update pharmacy supplier details and return updated record"""
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                self.executor,
+                lambda: self.supabase.table("pharmacy_suppliers")
+                .update(update_data)
+                .eq("pharmacy_id", pharmacy_id)
+                .eq("id", supplier_id)
+                .execute()
+            )
+            return await self.get_pharmacy_supplier_by_id(pharmacy_id, supplier_id)
+        except Exception as e:
+            print(f"Error updating pharmacy supplier: {e}")
+            return None
+
     # Hospital-based queries for frontdesk users
-    @cached(ttl=300, key_prefix="doctors_by_hospital")
     async def get_doctors_by_hospital(self, hospital_name: str) -> List[Dict[str, Any]]:
         """Get all doctors for a specific hospital (CACHED)"""
         try:
@@ -2572,44 +2896,41 @@ class DatabaseManager:
             print(f"Error fetching patients by hospital: {e}")
             return []
 
-    @cached(ttl=180, key_prefix="doctors_with_counts")
     async def get_doctors_with_patient_count_by_hospital(self, hospital_name: str) -> List[Dict[str, Any]]:
-        """Get doctors with their patient count for a specific hospital (OPTIMIZED + CACHED)"""
+        """Get doctors with their patient count for a specific hospital (OPTIMIZED - SINGLE QUERY)"""
         try:
-            print(f"Fetching doctors with patient count for hospital: {hospital_name}")
+            print(f"✅ Fetching doctors with patient count for hospital: {hospital_name} (optimized)")
             
-            # Get doctors for the hospital
-            doctors = await self.get_doctors_by_hospital(hospital_name)
-            if not doctors:
-                return []
-            
-            doctor_uids = [doctor["firebase_uid"] for doctor in doctors]
-            
-            # Try to use RPC function for optimal performance, but fallback if it doesn't exist
             loop = asyncio.get_event_loop()
-            patient_count_map = {}
             
             try:
-                # Try RPC function first (optimal if it exists)
-                patient_counts_response = await loop.run_in_executor(
+                # Use optimized RPC function - single query with JOIN and GROUP BY
+                response = await loop.run_in_executor(
                     self.executor,
-                    lambda: self.supabase.rpc('get_patient_counts_by_doctors', {
-                        'doctor_uids': doctor_uids
+                    lambda: self.supabase.rpc('get_doctors_with_patient_counts', {
+                        'hospital_name_param': hospital_name
                     }).execute()
                 )
                 
-                if patient_counts_response.data:
-                    # Create a map of doctor_uid -> patient_count
-                    patient_count_map = {
-                        item['created_by_doctor']: item['count'] 
-                        for item in patient_counts_response.data
-                    }
-                    print(f"Used RPC function for patient counts")
+                if response.data:
+                    print(f"✅ Found {len(response.data)} doctors with counts using optimized function (1 query)")
+                    return response.data
+                else:
+                    print(f"No doctors found for hospital: {hospital_name}")
+                    return []
+                    
             except Exception as rpc_error:
-                # RPC function doesn't exist, use fallback
-                print(f"RPC function not available, using fallback method: {rpc_error}")
+                # Fallback to old method if RPC function doesn't exist
+                print(f"⚠️ RPC function not available, using fallback (N+1 method): {rpc_error}")
                 
-                # Fallback: Fetch all patients for these doctors and count in Python
+                # Get doctors for the hospital
+                doctors = await self.get_doctors_by_hospital(hospital_name)
+                if not doctors:
+                    return []
+                
+                doctor_uids = [doctor["firebase_uid"] for doctor in doctors]
+                
+                # Fetch all patients in one query
                 patients_response = await loop.run_in_executor(
                     self.executor,
                     lambda: self.supabase.table("patients")
@@ -2619,65 +2940,99 @@ class DatabaseManager:
                 )
                 
                 # Count patients per doctor in Python
+                patient_count_map = {}
                 if patients_response.data:
                     for patient in patients_response.data:
                         doctor_uid = patient['created_by_doctor']
                         patient_count_map[doctor_uid] = patient_count_map.get(doctor_uid, 0) + 1
                     print(f"Counted {len(patients_response.data)} patients using fallback method")
-            
-            # Add patient counts to doctor info
-            doctors_with_counts = []
-            for doctor in doctors:
-                doctor_with_count = doctor.copy()
-                doctor_with_count["patient_count"] = patient_count_map.get(doctor["firebase_uid"], 0)
-                doctors_with_counts.append(doctor_with_count)
-            
-            print(f"Found {len(doctors_with_counts)} doctors with patient counts")
-            return doctors_with_counts
+                
+                # Add patient counts to doctor info
+                doctors_with_counts = []
+                for doctor in doctors:
+                    doctor_with_count = doctor.copy()
+                    doctor_with_count["patient_count"] = patient_count_map.get(doctor["firebase_uid"], 0)
+                    doctors_with_counts.append(doctor_with_count)
+                
+                print(f"Found {len(doctors_with_counts)} doctors with patient counts (fallback)")
+                return doctors_with_counts
             
         except Exception as e:
-            print(f"Error fetching doctors with patient count: {e}")
+            print(f"❌ Error fetching doctors with patient count: {e}")
             print(f"Traceback: {traceback.format_exc()}")
             return []
 
-    @cached(ttl=180, key_prefix="patients_with_doctor_info")
     async def get_patients_with_doctor_info_by_hospital(self, hospital_name: str) -> List[Dict[str, Any]]:
-        """Get patients with their doctor information for a specific hospital (CACHED)"""
+        """Get patients with their doctor information for a specific hospital (OPTIMIZED - SINGLE QUERY)"""
         try:
-            print(f"Fetching patients with doctor info for hospital: {hospital_name}")
+            print(f"✅ Fetching patients with doctor info for hospital: {hospital_name} (optimized)")
             
-            # Get all patients for this hospital
-            patients = await self.get_patients_by_hospital(hospital_name)
-            if not patients:
-                return []
+            loop = asyncio.get_event_loop()
             
-            # Get all doctors for this hospital for lookup
-            doctors = await self.get_doctors_by_hospital(hospital_name)
-            doctor_lookup = {doctor["firebase_uid"]: doctor for doctor in doctors}
-            
-            # Add doctor info to each patient
-            patients_with_doctor_info = []
-            for patient in patients:
-                doctor_uid = patient.get("created_by_doctor")
-                doctor_info = doctor_lookup.get(doctor_uid)
+            try:
+                # Use optimized RPC function - single query with JOIN
+                response = await loop.run_in_executor(
+                    self.executor,
+                    lambda: self.supabase.rpc('get_patients_with_doctor_info', {
+                        'hospital_name_param': hospital_name
+                    }).execute()
+                )
                 
-                patient_with_doctor = patient.copy()
-                if doctor_info:
-                    patient_with_doctor["doctor_name"] = f"{doctor_info.get('first_name', '')} {doctor_info.get('last_name', '')}".strip()
-                    patient_with_doctor["doctor_specialization"] = doctor_info.get("specialization", "")
-                    patient_with_doctor["doctor_phone"] = doctor_info.get("phone", "")
+                if response.data:
+                    # Transform the data to include doctor_name field
+                    patients_with_doctor_info = []
+                    for patient in response.data:
+                        # The function returns doctor_name already, but ensure backward compatibility
+                        patient_data = dict(patient)
+                        if 'doctor_name' not in patient_data:
+                            patient_data['doctor_name'] = f"{patient.get('doctor_first_name', '')} {patient.get('doctor_last_name', '')}".strip()
+                        patient_data['doctor_specialization'] = patient.get('doctor_specialization', '')
+                        patient_data['doctor_phone'] = patient.get('doctor_phone', '')
+                        patients_with_doctor_info.append(patient_data)
+                    
+                    print(f"✅ Found {len(patients_with_doctor_info)} patients with doctor info using optimized function (1 query)")
+                    return patients_with_doctor_info
                 else:
-                    patient_with_doctor["doctor_name"] = "Unknown"
-                    patient_with_doctor["doctor_specialization"] = ""
-                    patient_with_doctor["doctor_phone"] = ""
+                    print(f"No patients found for hospital: {hospital_name}")
+                    return []
+                    
+            except Exception as rpc_error:
+                # Fallback to old method if RPC function doesn't exist
+                print(f"⚠️ RPC function not available, using fallback (N+1 method): {rpc_error}")
                 
-                patients_with_doctor_info.append(patient_with_doctor)
-            
-            print(f"Found {len(patients_with_doctor_info)} patients with doctor info")
-            return patients_with_doctor_info
+                # Get all patients for this hospital
+                patients = await self.get_patients_by_hospital(hospital_name)
+                if not patients:
+                    return []
+                
+                # Get all doctors for this hospital for lookup
+                doctors = await self.get_doctors_by_hospital(hospital_name)
+                doctor_lookup = {doctor["firebase_uid"]: doctor for doctor in doctors}
+                
+                # Add doctor info to each patient
+                patients_with_doctor_info = []
+                for patient in patients:
+                    doctor_uid = patient.get("created_by_doctor")
+                    doctor_info = doctor_lookup.get(doctor_uid)
+                    
+                    patient_with_doctor = patient.copy()
+                    if doctor_info:
+                        patient_with_doctor["doctor_name"] = f"{doctor_info.get('first_name', '')} {doctor_info.get('last_name', '')}".strip()
+                        patient_with_doctor["doctor_specialization"] = doctor_info.get("specialization", "")
+                        patient_with_doctor["doctor_phone"] = doctor_info.get("phone", "")
+                    else:
+                        patient_with_doctor["doctor_name"] = "Unknown"
+                        patient_with_doctor["doctor_specialization"] = ""
+                        patient_with_doctor["doctor_phone"] = ""
+                    
+                    patients_with_doctor_info.append(patient_with_doctor)
+                
+                print(f"Found {len(patients_with_doctor_info)} patients with doctor info (fallback)")
+                return patients_with_doctor_info
             
         except Exception as e:
-            print(f"Error fetching patients with doctor info: {e}")
+            print(f"❌ Error fetching patients with doctor info: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
             return []
 
     async def validate_doctor_belongs_to_hospital(self, doctor_firebase_uid: str, hospital_name: str) -> bool:
@@ -2714,40 +3069,95 @@ class DatabaseManager:
         try:
             print(f"Validating patient {patient_id} belongs to hospital: {hospital_name}")
             
-            # Join patient with doctor in a single query to get hospital
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("patients")
-                .select("id, created_by_doctor")
-                .eq("id", patient_id)
-                .execute()
-            )
             
-            if not response.data:
-                print(f"Patient not found: {patient_id}")
-                return False
-            
-            patient = response.data[0]
-            patient_doctor_uid = patient.get("created_by_doctor")
-            
-            # Now check if this doctor belongs to the hospital
-            doctor_response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("doctors")
-                .select("hospital_name")
-                .eq("firebase_uid", patient_doctor_uid)
-                .eq("hospital_name", hospital_name)
-                .execute()
-            )
-            
-            is_valid = bool(doctor_response.data)
-            print(f"Patient {patient_id} belongs to hospital {hospital_name}: {is_valid}")
-            return is_valid
+            try:
+                # Use optimized RPC function - single query with JOIN
+                response = await loop.run_in_executor(
+                    self.executor,
+                    lambda: self.supabase.rpc('validate_patient_in_hospital', {
+                        'patient_id_param': patient_id,
+                        'hospital_name_param': hospital_name
+                    }).execute()
+                )
+                
+                is_valid = bool(response.data)
+                print(f"✅ Patient {patient_id} validation result: {is_valid} (optimized - 1 query)")
+                return is_valid
+                
+            except Exception as rpc_error:
+                # Fallback to old method
+                print(f"⚠️ RPC function not available, using fallback: {rpc_error}")
+                
+                # Join patient with doctor in a single query to get hospital
+                response = await loop.run_in_executor(
+                    self.executor,
+                    lambda: self.supabase.table("patients")
+                    .select("id, created_by_doctor")
+                    .eq("id", patient_id)
+                    .execute()
+                )
+                
+                if not response.data:
+                    print(f"Patient not found: {patient_id}")
+                    return False
+                
+                patient = response.data[0]
+                patient_doctor_uid = patient.get("created_by_doctor")
+                
+                # Now check if this doctor belongs to the hospital
+                doctor_response = await loop.run_in_executor(
+                    self.executor,
+                    lambda: self.supabase.table("doctors")
+                    .select("hospital_name")
+                    .eq("firebase_uid", patient_doctor_uid)
+                    .eq("hospital_name", hospital_name)
+                    .execute()
+                )
+                
+                is_valid = bool(doctor_response.data)
+                print(f"Patient {patient_id} belongs to hospital {hospital_name}: {is_valid} (fallback)")
+                return is_valid
             
         except Exception as e:
-            print(f"Error validating patient hospital: {e}")
+            print(f"❌ Error validating patient hospital: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
             return False
+
+    async def get_hospital_dashboard_optimized(self, hospital_name: str, recent_limit: int = 10) -> Optional[Dict[str, Any]]:
+        """Get complete hospital dashboard data in a SINGLE optimized query"""
+        try:
+            print(f"🚀 Fetching hospital dashboard for: {hospital_name} (ultra-optimized)")
+            
+            loop = asyncio.get_event_loop()
+            
+            try:
+                # Use ultra-optimized RPC function - SINGLE query for entire dashboard!
+                response = await loop.run_in_executor(
+                    self.executor,
+                    lambda: self.supabase.rpc('get_hospital_dashboard_data', {
+                        'hospital_name_param': hospital_name,
+                        'recent_limit': recent_limit
+                    }).execute()
+                )
+                
+                if response.data:
+                    dashboard_data = response.data
+                    print(f"✅ Hospital dashboard loaded in 1 query! Doctors: {dashboard_data.get('total_doctors')}, Patients: {dashboard_data.get('total_patients')}")
+                    return dashboard_data
+                else:
+                    print(f"No dashboard data found for hospital: {hospital_name}")
+                    return None
+                    
+            except Exception as rpc_error:
+                # Fallback to old method if RPC function doesn't exist
+                print(f"⚠️ RPC function not available, using fallback (multiple queries): {rpc_error}")
+                return None  # Let the calling code handle fallback
+            
+        except Exception as e:
+            print(f"❌ Error fetching hospital dashboard: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return None
 
     async def create_patient_by_frontdesk(self, patient_data: Dict[str, Any], doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
         """Create a new patient record via frontdesk with assigned doctor"""

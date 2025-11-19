@@ -16,11 +16,13 @@ import fitz  # PyMuPDF for PDF manipulation
 from typing import Dict, Any, List, Optional
 import requests
 from supabase import Client
+from async_file_downloader import file_downloader
 
 class VisitReportGenerator:
     def __init__(self):
         self.styles = getSampleStyleSheet()
         self.setup_custom_styles()
+        self.file_downloader = file_downloader  # Use global async downloader
     
     def setup_custom_styles(self):
         """Setup custom styles for the PDF"""
@@ -189,17 +191,21 @@ class VisitReportGenerator:
         return vital_data if vital_data else [["No vital signs recorded", ""]]
 
     async def download_template_file(self, template_url: str) -> bytes:
-        """Download template PDF from URL"""
+        """Download template PDF from URL using async non-blocking download"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: requests.get(template_url, timeout=30)
+            # Use the async file downloader to prevent blocking
+            file_content = await self.file_downloader.download_file(
+                url=template_url,
+                stream=True  # Use streaming for PDF templates
             )
-            response.raise_for_status()
-            return response.content
+            
+            if file_content:
+                return file_content
+            else:
+                raise Exception(f"Failed to download template from {template_url}")
+                
         except Exception as e:
-            print(f"Error downloading template: {e}")
+            print(f"❌ Error downloading template: {e}")
             raise Exception(f"Failed to download template: {str(e)}")
 
     def overlay_text_on_pdf(self, template_bytes: bytes, overlay_data: Dict[str, Any]) -> bytes:

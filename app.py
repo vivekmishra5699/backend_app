@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, EmailStr, ValidationError
+from pydantic import BaseModel, EmailStr, ValidationError, Field
 from datetime import datetime, timezone, timedelta, timedelta
 from typing import Optional, List, Dict, Any
 from supabase import create_client, Client
@@ -24,10 +24,15 @@ import concurrent.futures
 from pathlib import Path
 import os
 import requests
+import re
 import jwt
 from datetime import timedelta
 import httpx
 import uvicorn
+from async_file_downloader import file_downloader
+from connection_pool import get_supabase_client, close_connection_pools
+from thread_pool_manager import shutdown_thread_pool
+from optimized_cache import optimized_cache
 import firebase_admin
 import hashlib
 import hmac
@@ -77,6 +82,22 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
         print("✅ AI Analysis background processor stopped")
+        
+        # Get cache stats before shutdown
+        print("📊 Final cache statistics:")
+        cache_stats = await optimized_cache.get_stats()
+        for key, value in cache_stats.items():
+            print(f"   - {key}: {value}")
+        
+        # Close connection pools
+        print("🔌 Closing connection pools...")
+        await close_connection_pools()
+        print("✅ Connection pools closed successfully")
+        
+        # Shutdown unified thread pool
+        print("🧵 Shutting down unified thread pool...")
+        shutdown_thread_pool(wait=True)
+        print("✅ Thread pool shut down successfully")
 
 app = FastAPI(title="Doctor App API", version="1.0.0", lifespan=lifespan)
 
@@ -128,9 +149,16 @@ try:
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise ValueError("Service role key is required for RLS-enabled operations")
     
-    # Use service role client for database operations
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
-    print("Supabase initialized successfully with service role")
+    # Use service role client with connection pooling for database operations
+    supabase: Client = get_supabase_client(
+        supabase_url=SUPABASE_URL,
+        supabase_key=SUPABASE_SERVICE_ROLE_KEY,
+        pool_size=10,  # Maintain 10 active connections
+        max_overflow=20,  # Allow up to 20 overflow connections
+        pool_timeout=30,  # Connection timeout
+        pool_recycle=3600  # Recycle connections after 1 hour
+    )
+    print("✅ Supabase initialized with connection pooling")
     
     # Initialize database manager with service role client
     db = DatabaseManager(supabase)
@@ -243,6 +271,278 @@ class FrontdeskUpdate(BaseModel):
     phone: Optional[str] = None
     hospital_name: Optional[str] = None
     password: Optional[str] = None
+
+# Pharmacy Models
+class PharmacyRegister(BaseModel):
+    name: str
+    phone: Optional[str] = None
+    hospital_name: str
+    username: str
+    password: str
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "name": "City Hospital Pharmacy",
+                "phone": "+1-202-555-0110",
+                "hospital_name": "City Hospital",
+                "username": "city_pharmacy",
+                "password": "strongpassword123"
+            }
+        }
+
+
+class PharmacyLogin(BaseModel):
+    username: str
+    password: str
+
+
+class PharmacyProfile(BaseModel):
+    id: int
+    name: str
+    phone: Optional[str] = None
+    hospital_name: str
+    username: str
+    is_active: bool
+    created_at: str
+    updated_at: str
+    last_login_at: Optional[str] = None
+
+
+class PharmacyInventoryCreate(BaseModel):
+    medicine_name: str
+    sku: Optional[str] = None
+    batch_number: Optional[str] = None
+    expiry_date: Optional[str] = None  # YYYY-MM-DD
+    stock_quantity: int = Field(0, ge=0)
+    reorder_level: Optional[int] = Field(default=0, ge=0)
+    unit: Optional[str] = None
+    purchase_price: Optional[float] = Field(default=None, ge=0)
+    selling_price: Optional[float] = Field(default=None, ge=0)
+    tax_percent: Optional[float] = Field(default=None, ge=0, le=100, description="GST/VAT percentage for this stock item")
+    supplier_id: Optional[int] = Field(default=None, description="Supplier record ID from /pharmacy/{pharmacy_id}/suppliers")
+
+
+class PharmacyInventoryUpdate(BaseModel):
+    medicine_name: Optional[str] = None
+    sku: Optional[str] = None
+    batch_number: Optional[str] = None
+    expiry_date: Optional[str] = None
+    stock_quantity: Optional[int] = Field(default=None, ge=0)
+    reorder_level: Optional[int] = Field(default=None, ge=0)
+    unit: Optional[str] = None
+    purchase_price: Optional[float] = Field(default=None, ge=0)
+    selling_price: Optional[float] = Field(default=None, ge=0)
+    tax_percent: Optional[float] = Field(default=None, ge=0, le=100)
+    supplier_id: Optional[int] = Field(default=None, description="Link or unlink a supplier record")
+
+
+class PharmacyInventorySupplierInfo(BaseModel):
+    id: int
+    name: str
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
+
+
+class PharmacyInventoryItem(BaseModel):
+    id: int
+    pharmacy_id: int
+    medicine_name: str
+    sku: Optional[str] = None
+    batch_number: Optional[str] = None
+    expiry_date: Optional[str] = None
+    stock_quantity: int
+    reorder_level: Optional[int] = None
+    unit: Optional[str] = None
+    purchase_price: Optional[float] = None
+    selling_price: Optional[float] = None
+    tax_percent: Optional[float] = None
+    supplier_id: Optional[int] = None
+    supplier: Optional["PharmacyInventorySupplierInfo"] = None
+    created_at: str
+    updated_at: str
+
+
+class PharmacyInventoryAdjust(BaseModel):
+    quantity_delta: int = Field(..., description="Positive to increase stock, negative to decrease stock")
+    note: Optional[str] = None
+
+
+try:
+    PharmacyInventoryItem.model_rebuild()
+except AttributeError:
+    PharmacyInventoryItem.update_forward_refs()
+
+
+class PharmacyPrescriptionItem(BaseModel):
+    name: str
+    details: Optional[str] = None
+    dosage: Optional[str] = None
+    frequency: Optional[str] = None
+    duration: Optional[str] = None
+    instructions: Optional[str] = None
+
+
+class PharmacyPrescriptionView(BaseModel):
+    id: int
+    visit_id: int
+    patient_id: int
+    patient_name: str
+    patient_phone: Optional[str] = None
+    doctor_firebase_uid: str
+    doctor_name: Optional[str] = None
+    doctor_specialization: Optional[str] = None
+    hospital_name: str
+    pharmacy_id: Optional[int] = None
+    medications_text: Optional[str] = None
+    medications_json: Optional[List[Dict[str, Any]]] = None
+    status: str
+    visit_date: Optional[str] = None
+    visit_type: Optional[str] = None
+    notes: Optional[str] = None
+    total_estimated_amount: Optional[float] = None
+    created_at: str
+    updated_at: str
+    dispensed_at: Optional[str] = None
+
+
+class PharmacyPrescriptionStatusUpdate(BaseModel):
+    status: str
+    notes: Optional[str] = None
+
+
+class PharmacyInvoiceItem(BaseModel):
+    inventory_item_id: Optional[int] = Field(default=None, description="Reference to inventory item if applicable")
+    medicine_name: str
+    quantity: int = Field(..., gt=0)
+    unit_price: float = Field(..., ge=0)
+    subtotal: Optional[float] = Field(default=None, ge=0)
+
+
+class PharmacyInvoiceCreate(BaseModel):
+    items: List[PharmacyInvoiceItem]
+    subtotal: float = Field(..., ge=0)
+    tax: Optional[float] = Field(default=0, ge=0)
+    discount: Optional[float] = Field(default=0, ge=0)
+    total_amount: float = Field(..., ge=0)
+    payment_method: Optional[str] = None
+    status: Optional[str] = "paid"
+    notes: Optional[str] = None
+
+
+class PharmacyInvoiceResponse(BaseModel):
+    id: int
+    pharmacy_id: int
+    prescription_id: Optional[int] = None
+    invoice_number: str
+    items: List[Dict[str, Any]]
+    subtotal: float
+    tax: float
+    discount: float
+    total_amount: float
+    payment_method: Optional[str] = None
+    status: str
+    generated_at: str
+    created_by: Optional[str] = None
+    notes: Optional[str] = None
+    # Enriched patient details (sourced from linked prescription)
+    patient_id: Optional[int] = None
+    patient_name: Optional[str] = None
+    patient_phone: Optional[str] = None
+    # Prescription date (visit date) for UI display
+    prescription_date: Optional[str] = None
+
+
+class PharmacyPatientMedications(BaseModel):
+    patient_id: int
+    patient_name: str
+    patient_phone: Optional[str] = None
+    total_prescriptions: int
+    pending_prescriptions: int
+    last_prescription_id: Optional[int] = None
+    last_prescription_status: Optional[str] = None
+    last_visit_date: Optional[str] = None
+    last_updated_at: Optional[str] = None
+    last_medications: List[Dict[str, Any]] = Field(default_factory=list)
+    last_invoice_id: Optional[int] = None
+    last_invoice_number: Optional[str] = None
+    last_invoice_total: Optional[float] = None
+    last_invoice_status: Optional[str] = None
+    last_invoice_date: Optional[str] = None
+
+
+class PharmacyPurchaseHistoryItem(BaseModel):
+    invoice_id: int
+    invoice_number: str
+    prescription_id: int
+    patient_id: int
+    patient_name: str
+    patient_phone: Optional[str] = None
+    total_amount: float
+    status: str
+    payment_method: Optional[str] = None
+    generated_at: str
+    prescription_status: Optional[str] = None
+    prescription_date: Optional[str] = None
+    medications: List[Dict[str, Any]] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
+class PharmacySupplierBase(BaseModel):
+    name: str
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
+    address: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: Optional[bool] = True
+
+
+class PharmacySupplierCreate(PharmacySupplierBase):
+    name: str
+
+
+class PharmacySupplierUpdate(BaseModel):
+    name: Optional[str] = None
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[EmailStr] = None
+    address: Optional[str] = None
+    notes: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class PharmacySupplierResponse(PharmacySupplierBase):
+    id: int
+    pharmacy_id: int
+    created_at: str
+    updated_at: str
+
+
+class PharmacyPatientDetailResponse(BaseModel):
+    patient_id: int
+    patient_name: str
+    patient_phone: Optional[str] = None
+    patient_email: Optional[str] = None
+    patient_gender: Optional[str] = None
+    patient_date_of_birth: Optional[str] = None
+    total_prescriptions: int
+    pending_prescriptions: int
+    latest_prescription: Optional[PharmacyPrescriptionView] = None
+    prescriptions: List[PharmacyPrescriptionView] = Field(default_factory=list)
+    invoices: List[PharmacyPurchaseHistoryItem] = Field(default_factory=list)
+
+
+class PharmacyDashboardSummary(BaseModel):
+    pharmacy_profile: PharmacyProfile
+    pending_prescriptions: int
+    ready_prescriptions: int
+    dispensed_today: int
+    inventory_low_stock: int
+    total_inventory_items: int
+    sales_today: float
+    sales_month: float
 
 # Hospital-based Response Models for Frontdesk
 class DoctorWithPatientCount(BaseModel):
@@ -804,6 +1104,12 @@ class AIAnalysisResult(BaseModel):
     model_used: str
     confidence_score: float
     raw_analysis: str
+    # Enhanced visit-contextual fields
+    clinical_correlation: Optional[str] = None
+    detailed_findings: Optional[str] = None
+    critical_findings: Optional[str] = None
+    treatment_evaluation: Optional[str] = None
+    # Original fields (keeping for backward compatibility)
     document_summary: Optional[str] = None
     clinical_significance: Optional[str] = None
     correlation_with_patient: Optional[str] = None
@@ -993,6 +1299,33 @@ async def get_current_frontdesk_user(frontdesk_id: int) -> Dict[str, Any]:
             detail="Authentication error"
         )
 
+
+async def get_current_pharmacy_user(pharmacy_id: int) -> Dict[str, Any]:
+    """Get pharmacy user by ID - temporary simple auth"""
+    try:
+        pharmacy_user = await db.get_pharmacy_user_by_id(pharmacy_id)
+        if not pharmacy_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Pharmacy account not found or inactive"
+            )
+
+        if not pharmacy_user.get("is_active", True):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Pharmacy account is deactivated"
+            )
+
+        return pharmacy_user
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting pharmacy user: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Authentication error"
+        )
+
 # API Routes with database manager
 @app.post("/register", response_model=dict)
 async def register_doctor(doctor: DoctorRegister):
@@ -1131,6 +1464,8 @@ async def test_endpoint():
             "error": str(e),
             "traceback": traceback.format_exc()
         }
+
+
 
 @app.post("/validate-token", response_model=dict)
 async def validate_token(token_data: FirebaseToken):
@@ -1300,6 +1635,290 @@ def verify_password(password: str, hashed_password: str) -> bool:
     """Verify a password against its hash"""
     return hash_password(password) == hashed_password
 
+
+def generate_invoice_number() -> str:
+    """Generate a human-readable invoice number"""
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    return f"INV-{timestamp}-{uuid.uuid4().hex[:6].upper()}"
+
+
+def parse_medications_text_to_items(medications_text: Optional[str]) -> List[Dict[str, Any]]:
+    """Parse free-text medications into structured items"""
+    if not medications_text:
+        return []
+    entries = re.split(r"[\n;]+", medications_text)
+    items: List[Dict[str, Any]] = []
+    for entry in entries:
+        raw = entry.strip()
+        if not raw:
+            continue
+        item_name = raw
+        item: Dict[str, Any] = {
+            "name": item_name,
+            "medicine_name": item_name
+        }
+        if "-" in raw:
+            name_part, detail_part = raw.split("-", 1)
+            cleaned_name = name_part.strip()
+            item["name"] = cleaned_name
+            item["medicine_name"] = cleaned_name
+            if detail_part.strip():
+                item["details"] = detail_part.strip()
+        elif ":" in raw:
+            name_part, detail_part = raw.split(":", 1)
+            cleaned_name = name_part.strip()
+            item["name"] = cleaned_name
+            item["medicine_name"] = cleaned_name
+            if detail_part.strip():
+                item["details"] = detail_part.strip()
+        items.append(item)
+    return items
+
+
+def normalize_medication_items(raw_items: Optional[Any]) -> List[Dict[str, Any]]:
+    if not raw_items:
+        return []
+    normalized: List[Dict[str, Any]] = []
+    if isinstance(raw_items, str):
+        try:
+            raw_items = json.loads(raw_items)
+        except (json.JSONDecodeError, TypeError):
+            raw_items = []
+    if not isinstance(raw_items, list):
+        return []
+    for entry in raw_items:
+        if isinstance(entry, dict):
+            name = entry.get("name") or entry.get("medicine_name")
+            if not name:
+                name = str(entry)
+            normalized.append({
+                **entry,
+                "name": name,
+                "medicine_name": entry.get("medicine_name") or name
+            })
+        else:
+            name = str(entry)
+            normalized.append({
+                "name": name,
+                "medicine_name": name
+            })
+    return normalized
+
+
+async def sync_pharmacy_prescription_from_visit(visit: Dict[str, Any], doctor: Dict[str, Any], patient: Dict[str, Any]) -> None:
+    """Create or update pharmacy prescription data whenever visit medications change"""
+    try:
+        if not visit or not doctor or not patient:
+            print("❌ Sync skipped: Missing required data (visit, doctor, or patient)")
+            return
+
+        visit_id = visit.get("id")
+        if not visit_id:
+            print("❌ Sync skipped: No visit ID found")
+            return
+
+        medications_text = visit.get("medications")
+        existing_prescription = await db.get_pharmacy_prescription_by_visit(visit_id)
+
+        if medications_text and medications_text.strip():
+            hospital_name = doctor.get("hospital_name")
+            if not hospital_name:
+                print(f"❌ Doctor {doctor.get('firebase_uid')} missing hospital name; skipping pharmacy sync")
+                return
+
+            parsed_items = parse_medications_text_to_items(medications_text)
+            doctor_name = f"Dr. {doctor.get('first_name', '').strip()} {doctor.get('last_name', '').strip()}".strip()
+            timestamp = datetime.now(timezone.utc).isoformat()
+
+            prescription_payload: Dict[str, Any] = {
+                "visit_id": visit_id,
+                "patient_id": visit.get("patient_id"),
+                "patient_name": f"{patient.get('first_name', '')} {patient.get('last_name', '')}".strip(),
+                "patient_phone": patient.get("phone"),
+                "doctor_firebase_uid": doctor.get("firebase_uid"),
+                "doctor_name": doctor_name,
+                "doctor_specialization": doctor.get("specialization"),
+                "hospital_name": hospital_name,
+                "medications_text": medications_text.strip(),
+                "medications_json": parsed_items,
+                "status": "pending",
+                "visit_date": visit.get("visit_date"),
+                "visit_type": visit.get("visit_type"),
+                "notes": visit.get("notes") or visit.get("treatment_plan"),
+                "updated_at": timestamp,
+                "created_at": timestamp
+            }
+
+            assigned_pharmacy_id: Optional[int] = None
+            if existing_prescription and existing_prescription.get("pharmacy_id"):
+                assigned_pharmacy_id = existing_prescription["pharmacy_id"]
+            else:
+                pharmacies = await db.get_pharmacy_users_by_hospital(hospital_name)
+                if pharmacies:
+                    assigned_pharmacy_id = pharmacies[0]["id"]
+
+            if assigned_pharmacy_id:
+                prescription_payload["pharmacy_id"] = assigned_pharmacy_id
+
+            if existing_prescription:
+                if existing_prescription.get("status") == "dispensed":
+                    print(f"Prescription for visit {visit_id} already dispensed; skipping update")
+                    return
+                # Preserve original creation timestamp
+                prescription_payload.pop("created_at")
+                await db.update_pharmacy_prescription(existing_prescription["id"], prescription_payload)
+                print(f"✅ Updated pharmacy prescription for visit {visit_id}")
+            else:
+                created_prescription = await db.create_pharmacy_prescription(prescription_payload)
+                if created_prescription:
+                    print(f"✅ Created pharmacy prescription for visit {visit_id}")
+                else:
+                    print(f"❌ Failed to create pharmacy prescription for visit {visit_id}")
+                    
+        else:
+            # No medications -> cancel pending prescriptions if applicable
+            if existing_prescription and existing_prescription.get("status") not in ["dispensed", "cancelled"]:
+                await db.update_pharmacy_prescription(existing_prescription["id"], {
+                    "status": "cancelled",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "notes": "Automatically cancelled because medications were removed from the visit"
+                })
+    except Exception as e:
+        print(f"Error syncing pharmacy prescription for visit {visit.get('id')}: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+
+
+def safe_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def safe_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def map_inventory_item(item: Dict[str, Any]) -> PharmacyInventoryItem:
+    supplier_payload = item.get("supplier")
+    supplier_info = None
+    if isinstance(supplier_payload, dict) and supplier_payload.get("id") is not None:
+        supplier_info = PharmacyInventorySupplierInfo(
+            id=supplier_payload.get("id"),
+            name=supplier_payload.get("name", ""),
+            contact_person=supplier_payload.get("contact_person"),
+            phone=supplier_payload.get("phone"),
+            email=supplier_payload.get("email")
+        )
+
+    return PharmacyInventoryItem(
+        id=item.get("id"),
+        pharmacy_id=item.get("pharmacy_id"),
+        medicine_name=item.get("medicine_name", ""),
+        sku=item.get("sku"),
+        batch_number=item.get("batch_number"),
+        expiry_date=item.get("expiry_date"),
+        stock_quantity=safe_int(item.get("stock_quantity")) or 0,
+        reorder_level=safe_int(item.get("reorder_level")),
+        unit=item.get("unit"),
+        purchase_price=safe_float(item.get("purchase_price")),
+        selling_price=safe_float(item.get("selling_price")),
+        tax_percent=safe_float(item.get("tax_percent")),
+        supplier_id=safe_int(item.get("supplier_id")),
+        supplier=supplier_info,
+        created_at=item.get("created_at", datetime.now(timezone.utc).isoformat()),
+        updated_at=item.get("updated_at", datetime.now(timezone.utc).isoformat())
+    )
+
+
+def map_prescription_to_view(prescription: Dict[str, Any]) -> PharmacyPrescriptionView:
+    meds_json = normalize_medication_items(prescription.get("medications_json"))
+
+    return PharmacyPrescriptionView(
+        id=prescription.get("id"),
+        visit_id=prescription.get("visit_id"),
+        patient_id=prescription.get("patient_id"),
+        patient_name=prescription.get("patient_name", ""),
+        patient_phone=prescription.get("patient_phone"),
+        doctor_firebase_uid=prescription.get("doctor_firebase_uid", ""),
+        doctor_name=prescription.get("doctor_name"),
+        doctor_specialization=prescription.get("doctor_specialization"),
+        hospital_name=prescription.get("hospital_name", ""),
+        pharmacy_id=prescription.get("pharmacy_id"),
+        medications_text=prescription.get("medications_text"),
+    medications_json=meds_json,
+        status=prescription.get("status", "pending"),
+        visit_date=prescription.get("visit_date"),
+        visit_type=prescription.get("visit_type"),
+        notes=prescription.get("notes"),
+        total_estimated_amount=safe_float(prescription.get("total_estimated_amount")),
+        created_at=prescription.get("created_at", datetime.now(timezone.utc).isoformat()),
+        updated_at=prescription.get("updated_at", datetime.now(timezone.utc).isoformat()),
+        dispensed_at=prescription.get("dispensed_at")
+    )
+
+
+def map_invoice_to_response(invoice: Dict[str, Any]) -> PharmacyInvoiceResponse:
+    invoice_items = normalize_medication_items(invoice.get("items"))
+
+    return PharmacyInvoiceResponse(
+        id=invoice.get("id"),
+        pharmacy_id=invoice.get("pharmacy_id"),
+        prescription_id=invoice.get("prescription_id"),
+        invoice_number=invoice.get("invoice_number", ""),
+        items=invoice_items,
+        subtotal=safe_float(invoice.get("subtotal")) or 0.0,
+        tax=safe_float(invoice.get("tax")) or 0.0,
+        discount=safe_float(invoice.get("discount")) or 0.0,
+        total_amount=safe_float(invoice.get("total_amount")) or 0.0,
+        payment_method=invoice.get("payment_method"),
+        status=invoice.get("status", "paid"),
+        generated_at=invoice.get("generated_at", datetime.now(timezone.utc).isoformat()),
+        created_by=invoice.get("created_by"),
+        notes=invoice.get("notes"),
+        patient_id=invoice.get("patient_id"),
+        patient_name=invoice.get("patient_name"),
+        patient_phone=invoice.get("patient_phone"),
+        prescription_date=invoice.get("prescription_date"),
+    )
+
+
+def map_pharmacy_profile(pharmacy_user: Dict[str, Any]) -> PharmacyProfile:
+    return PharmacyProfile(
+        id=pharmacy_user.get("id"),
+        name=pharmacy_user.get("name", ""),
+        phone=pharmacy_user.get("phone"),
+        hospital_name=pharmacy_user.get("hospital_name", ""),
+        username=pharmacy_user.get("username", ""),
+        is_active=pharmacy_user.get("is_active", True),
+        created_at=pharmacy_user.get("created_at", datetime.now(timezone.utc).isoformat()),
+        updated_at=pharmacy_user.get("updated_at", datetime.now(timezone.utc).isoformat()),
+        last_login_at=pharmacy_user.get("last_login_at")
+    )
+
+
+def map_supplier_record(supplier: Dict[str, Any]) -> PharmacySupplierResponse:
+    return PharmacySupplierResponse(
+        id=supplier.get("id"),
+        pharmacy_id=supplier.get("pharmacy_id"),
+        name=supplier.get("name", ""),
+        contact_person=supplier.get("contact_person"),
+        phone=supplier.get("phone"),
+        email=supplier.get("email"),
+        address=supplier.get("address"),
+        notes=supplier.get("notes"),
+        is_active=bool(supplier.get("is_active", True)),
+        created_at=supplier.get("created_at", datetime.now(timezone.utc).isoformat()),
+        updated_at=supplier.get("updated_at", datetime.now(timezone.utc).isoformat()),
+    )
+
 # Frontdesk Authentication Routes
 @app.post("/frontdesk/register", response_model=dict)
 async def register_frontdesk_user(frontdesk: FrontdeskRegister):
@@ -1434,6 +2053,860 @@ async def login_frontdesk_user(frontdesk_login: FrontdeskLogin):
             detail=f"Login error: {str(e)}"
         )
 
+# Pharmacy Authentication & Dashboard Routes
+@app.post("/pharmacy/register", response_model=dict)
+async def register_pharmacy_user(pharmacy: PharmacyRegister):
+    try:
+        if not pharmacy.name or not pharmacy.hospital_name or not pharmacy.username or not pharmacy.password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Name, hospital_name, username and password are required"
+            )
+
+        if len(pharmacy.password) < 6:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Password must be at least 6 characters long"
+            )
+
+        existing = await db.get_pharmacy_user_by_username(pharmacy.username)
+        if existing:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username already exists"
+            )
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        pharmacy_data = {
+            "name": pharmacy.name,
+            "phone": pharmacy.phone,
+            "hospital_name": pharmacy.hospital_name,
+            "username": pharmacy.username,
+            "password_hash": hash_password(pharmacy.password),
+            "is_active": True,
+            "created_at": timestamp,
+            "updated_at": timestamp
+        }
+
+        created_pharmacy = await db.create_pharmacy_user(pharmacy_data)
+        if not created_pharmacy:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create pharmacy user"
+            )
+
+        return {
+            "message": "Pharmacy registered successfully",
+            "pharmacy_id": created_pharmacy["id"]
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Unexpected pharmacy registration error: {type(e).__name__}: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Pharmacy registration error: {str(e)}"
+        )
+
+
+@app.post("/pharmacy/login", response_model=dict)
+async def login_pharmacy_user(pharmacy_login: PharmacyLogin):
+    try:
+        if not pharmacy_login.username or not pharmacy_login.password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username and password are required"
+            )
+
+        pharmacy_user = await db.get_pharmacy_user_by_username(pharmacy_login.username)
+        if not pharmacy_user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid username or password"
+            )
+
+        if not verify_password(pharmacy_login.password, pharmacy_user.get("password_hash", "")):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid username or password"
+            )
+
+        if not pharmacy_user.get("is_active", True):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Pharmacy account is deactivated"
+            )
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        await db.update_pharmacy_user(pharmacy_user["id"], {
+            "last_login_at": timestamp,
+            "updated_at": timestamp
+        })
+
+        refreshed = await db.get_pharmacy_user_by_id(pharmacy_user["id"])
+        profile = map_pharmacy_profile(refreshed or pharmacy_user)
+
+        return {
+            "message": "Login successful",
+            "pharmacy_user": profile.model_dump()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Unexpected pharmacy login error: {type(e).__name__}: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Login error: {str(e)}"
+        )
+
+
+@app.get("/pharmacy/{pharmacy_id}/profile", response_model=PharmacyProfile)
+async def get_pharmacy_profile(pharmacy_id: int):
+    pharmacy_user = await get_current_pharmacy_user(pharmacy_id)
+    return map_pharmacy_profile(pharmacy_user)
+
+
+@app.get("/pharmacy/{pharmacy_id}/dashboard", response_model=PharmacyDashboardSummary)
+async def get_pharmacy_dashboard(pharmacy_id: int):
+    pharmacy_user = await get_current_pharmacy_user(pharmacy_id)
+    profile = map_pharmacy_profile(pharmacy_user)
+
+    hospital_name = profile.hospital_name
+    # Get all prescriptions for this hospital
+    all_prescriptions = await db.get_pharmacy_prescriptions(hospital_name, None)
+    # Include both unassigned and assigned to this pharmacy
+    prescriptions = [
+        p for p in all_prescriptions 
+        if p.get("pharmacy_id") is None or p.get("pharmacy_id") == pharmacy_id
+    ]
+
+    pending_prescriptions = len([p for p in prescriptions if (p.get("status") or "").lower() == "pending"])
+    ready_prescriptions = len([p for p in prescriptions if (p.get("status") or "").lower() == "ready"])
+
+    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    dispensed_today = len([
+        p for p in prescriptions
+        if (p.get("status") or "").lower() == "dispensed"
+        and ((p.get("dispensed_at") or p.get("updated_at") or "")[:10] == today_str)
+    ])
+
+    inventory_raw = await db.get_pharmacy_inventory_items(pharmacy_id)
+    inventory_items = [map_inventory_item(item) for item in inventory_raw]
+    inventory_low_stock = len([
+        item for item in inventory_items
+        if item.reorder_level is not None and item.reorder_level > 0 and item.stock_quantity <= item.reorder_level
+    ])
+
+    total_inventory_items = len(inventory_items)
+
+    month_start = datetime.now(timezone.utc).replace(day=1)
+    next_month = (month_start + timedelta(days=32)).replace(day=1)
+    month_end = next_month - timedelta(days=1)
+
+    sales_today_summary = await db.get_pharmacy_invoice_summary(pharmacy_id, start_date=today_str, end_date=today_str)
+    sales_month_summary = await db.get_pharmacy_invoice_summary(
+        pharmacy_id,
+        start_date=month_start.strftime("%Y-%m-%d"),
+        end_date=month_end.strftime("%Y-%m-%d")
+    )
+
+    return PharmacyDashboardSummary(
+        pharmacy_profile=profile,
+        pending_prescriptions=pending_prescriptions,
+        ready_prescriptions=ready_prescriptions,
+        dispensed_today=dispensed_today,
+        inventory_low_stock=inventory_low_stock,
+        total_inventory_items=total_inventory_items,
+        sales_today=sales_today_summary.get("total_sales", 0.0),
+        sales_month=sales_month_summary.get("total_sales", 0.0)
+    )
+
+
+@app.get("/pharmacy/{pharmacy_id}/prescriptions", response_model=List[PharmacyPrescriptionView])
+async def list_pharmacy_prescriptions(
+    pharmacy_id: int,
+    status: Optional[str] = None,
+    include_unassigned: bool = True
+):
+    pharmacy_user = await get_current_pharmacy_user(pharmacy_id)
+    hospital_name = pharmacy_user["hospital_name"]
+
+    # Get all prescriptions for this hospital
+    prescriptions = await db.get_pharmacy_prescriptions(hospital_name, None)
+    
+    # Filter prescriptions based on pharmacy assignment
+    if include_unassigned:
+        # Include both unassigned prescriptions and prescriptions assigned to this pharmacy
+        prescriptions = [
+            p for p in prescriptions 
+            if p.get("pharmacy_id") is None or p.get("pharmacy_id") == pharmacy_id
+        ]
+    else:
+        # Only include prescriptions specifically assigned to this pharmacy
+        prescriptions = [p for p in prescriptions if p.get("pharmacy_id") == pharmacy_id]
+
+    # Filter by status if specified
+    if status:
+        desired = {s.strip().lower() for s in status.split(",") if s.strip()}
+        prescriptions = [
+            p for p in prescriptions
+            if (p.get("status") or "").lower() in desired
+        ]
+
+    return [map_prescription_to_view(prescription) for prescription in prescriptions]
+
+
+@app.get("/pharmacy/{pharmacy_id}/prescriptions/{prescription_id}", response_model=PharmacyPrescriptionView)
+async def get_pharmacy_prescription(pharmacy_id: int, prescription_id: int):
+    pharmacy_user = await get_current_pharmacy_user(pharmacy_id)
+    prescription = await db.get_pharmacy_prescription_by_id(prescription_id)
+
+    if not prescription:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Prescription not found")
+
+    if prescription.get("hospital_name") != pharmacy_user.get("hospital_name"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied for this prescription")
+
+    if prescription.get("pharmacy_id") not in (None, pharmacy_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Prescription is assigned to a different pharmacy")
+
+    return map_prescription_to_view(prescription)
+
+
+@app.post("/pharmacy/{pharmacy_id}/prescriptions/{prescription_id}/claim", response_model=dict)
+async def claim_pharmacy_prescription(pharmacy_id: int, prescription_id: int):
+    pharmacy_user = await get_current_pharmacy_user(pharmacy_id)
+    prescription = await db.get_pharmacy_prescription_by_id(prescription_id)
+
+    if not prescription:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Prescription not found")
+
+    if prescription.get("hospital_name") != pharmacy_user.get("hospital_name"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot claim prescription from another hospital")
+
+    if prescription.get("pharmacy_id") not in (None, pharmacy_id):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Prescription already assigned to another pharmacy")
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    await db.update_pharmacy_prescription(prescription_id, {
+        "pharmacy_id": pharmacy_id,
+        "updated_at": timestamp
+    })
+
+    return {"message": "Prescription claimed successfully"}
+
+
+@app.post("/pharmacy/{pharmacy_id}/prescriptions/{prescription_id}/status", response_model=dict)
+async def update_pharmacy_prescription_status(
+    pharmacy_id: int,
+    prescription_id: int,
+    status_update: PharmacyPrescriptionStatusUpdate
+):
+    pharmacy_user = await get_current_pharmacy_user(pharmacy_id)
+    prescription = await db.get_pharmacy_prescription_by_id(prescription_id)
+
+    if not prescription:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Prescription not found")
+
+    if prescription.get("hospital_name") != pharmacy_user.get("hospital_name"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot update prescription from another hospital")
+
+    if prescription.get("pharmacy_id") not in (None, pharmacy_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Prescription belongs to a different pharmacy")
+
+    allowed_statuses = {"pending", "preparing", "ready", "dispensed", "cancelled"}
+    new_status = (status_update.status or "").lower()
+    if new_status not in allowed_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Status must be one of {', '.join(allowed_statuses)}"
+        )
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    update_data: Dict[str, Any] = {
+        "status": new_status,
+        "pharmacy_id": pharmacy_id,
+        "updated_at": timestamp
+    }
+
+    if status_update.notes:
+        update_data["notes"] = status_update.notes
+
+    if new_status == "dispensed":
+        update_data["dispensed_at"] = timestamp
+
+    await db.update_pharmacy_prescription(prescription_id, update_data)
+
+    return {"message": "Prescription status updated", "status": new_status}
+
+
+@app.post("/pharmacy/{pharmacy_id}/prescriptions/{prescription_id}/invoice", response_model=PharmacyInvoiceResponse)
+async def create_pharmacy_invoice(
+    pharmacy_id: int,
+    prescription_id: int,
+    invoice: PharmacyInvoiceCreate
+):
+    pharmacy_user = await get_current_pharmacy_user(pharmacy_id)
+    prescription = await db.get_pharmacy_prescription_by_id(prescription_id)
+
+    if not prescription:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Prescription not found")
+
+    if prescription.get("hospital_name") != pharmacy_user.get("hospital_name"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cannot invoice prescription from another hospital")
+
+    if prescription.get("pharmacy_id") not in (None, pharmacy_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Prescription belongs to a different pharmacy")
+
+    if not invoice.items:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invoice must contain at least one item")
+
+    normalized_items = []
+    subtotal_acc = 0.0
+    for item in invoice.items:
+        item_subtotal = item.subtotal if item.subtotal is not None else round(item.quantity * item.unit_price, 2)
+        normalized = {
+            "inventory_item_id": item.inventory_item_id,
+            "medicine_name": item.medicine_name,
+            "name": item.medicine_name,
+            "quantity": item.quantity,
+            "unit_price": round(item.unit_price, 2),
+            "subtotal": round(item_subtotal, 2)
+        }
+        subtotal_acc += normalized["subtotal"]
+        normalized_items.append(normalized)
+
+    subtotal_acc = round(subtotal_acc, 2)
+    if abs(subtotal_acc - round(invoice.subtotal, 2)) > 0.05:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Subtotal does not match line items")
+
+    tax_amount = round(invoice.tax or 0.0, 2)
+    discount_amount = round(invoice.discount or 0.0, 2)
+    total_expected = round(subtotal_acc + tax_amount - discount_amount, 2)
+    if abs(total_expected - round(invoice.total_amount, 2)) > 0.05:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Total amount does not balance with subtotal, tax and discount")
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+    invoice_payload = {
+        "pharmacy_id": pharmacy_id,
+        "prescription_id": prescription_id,
+        "invoice_number": generate_invoice_number(),
+        "items": normalized_items,
+        "subtotal": subtotal_acc,
+        "tax": tax_amount,
+        "discount": discount_amount,
+        "total_amount": round(invoice.total_amount, 2),
+        "payment_method": invoice.payment_method,
+        "status": (invoice.status or "paid").lower(),
+        "generated_at": timestamp,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "created_by": pharmacy_user.get("username"),
+        "notes": invoice.notes
+    }
+
+    created_invoice = await db.create_pharmacy_invoice(invoice_payload)
+    if not created_invoice:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create invoice")
+
+    # Update stock levels for referenced items
+    for item in normalized_items:
+        if item.get("inventory_item_id"):
+            await db.adjust_pharmacy_inventory_stock(pharmacy_id, item["inventory_item_id"], -item["quantity"])
+
+    await db.update_pharmacy_prescription(prescription_id, {
+        "status": "dispensed",
+        "pharmacy_id": pharmacy_id,
+        "dispensed_at": timestamp,
+        "updated_at": timestamp
+    })
+
+    created_invoice["items"] = normalized_items
+    # Enrich with patient details for immediate response
+    try:
+        presc = await db.get_pharmacy_prescription_by_id(prescription_id)
+        if presc:
+            created_invoice["patient_id"] = presc.get("patient_id")
+            created_invoice["patient_name"] = presc.get("patient_name")
+            created_invoice["patient_phone"] = presc.get("patient_phone")
+            # Prefer the visit_date; fallback to prescription created_at's date part
+            visit_date = presc.get("visit_date")
+            if visit_date:
+                created_invoice["prescription_date"] = visit_date[:10]
+            else:
+                created_at = presc.get("created_at") or ""
+                created_date = created_at[:10] if len(created_at) >= 10 else None
+                created_invoice["prescription_date"] = created_date
+    except Exception:
+        pass
+    return map_invoice_to_response(created_invoice)
+
+
+# Pharmacy Inventory & Analytics Routes
+@app.get("/pharmacy/{pharmacy_id}/invoices", response_model=List[PharmacyInvoiceResponse])
+async def list_pharmacy_invoices(
+    pharmacy_id: int,
+    prescription_id: Optional[int] = None,
+    status: Optional[str] = None,
+    start_date: Optional[str] = None,  # YYYY-MM-DD
+    end_date: Optional[str] = None     # YYYY-MM-DD
+):
+    """List invoices for a pharmacy with optional filtering.
+
+    - prescription_id: only invoices for a specific prescription
+    - status: comma-separated (paid, pending, cancelled, refunded, etc.)
+    - start_date/end_date: filter by generated_at date (inclusive)
+    """
+    await get_current_pharmacy_user(pharmacy_id)
+
+    invoices = await db.get_pharmacy_invoices_by_pharmacy(pharmacy_id)
+
+    # Filter by prescription_id
+    if prescription_id is not None:
+        invoices = [inv for inv in invoices if inv.get("prescription_id") == prescription_id]
+
+    # Filter by status
+    if status:
+        desired = {s.strip().lower() for s in status.split(",") if s.strip()}
+        invoices = [
+            inv for inv in invoices
+            if (inv.get("status") or "").lower() in desired
+        ]
+
+    # Filter by date range using the date part of generated_at (or created_at fallback)
+    if start_date or end_date:
+        start = start_date or "0001-01-01"
+        end = end_date or "9999-12-31"
+        filtered: List[Dict[str, Any]] = []
+        for inv in invoices:
+            dt_str = inv.get("generated_at") or inv.get("created_at") or ""
+            inv_date = dt_str[:10] if len(dt_str) >= 10 else "0001-01-01"
+            if start <= inv_date <= end:
+                filtered.append(inv)
+        invoices = filtered
+
+    # Enrich with patient details from prescriptions
+    prescription_cache: Dict[int, Optional[Dict[str, Any]]] = {}
+    enriched_responses: List[PharmacyInvoiceResponse] = []
+    for inv in invoices:
+        presc_id = inv.get("prescription_id")
+        if presc_id:
+            if presc_id not in prescription_cache:
+                prescription_cache[presc_id] = await db.get_pharmacy_prescription_by_id(presc_id)
+            presc = prescription_cache[presc_id]
+            if presc:
+                visit_date = presc.get("visit_date")
+                created_at = presc.get("created_at") or ""
+                created_date = created_at[:10] if len(created_at) >= 10 else None
+                inv = {
+                    **inv,
+                    "patient_id": presc.get("patient_id"),
+                    "patient_name": presc.get("patient_name"),
+                    "patient_phone": presc.get("patient_phone"),
+                    "prescription_date": (visit_date[:10] if visit_date else created_date),
+                }
+        enriched_responses.append(map_invoice_to_response(inv))
+
+    # Map to response model (also normalizes items JSON)
+    return enriched_responses
+
+
+@app.get("/pharmacy/{pharmacy_id}/patients/with-medications", response_model=List[PharmacyPatientMedications])
+async def list_pharmacy_patients_with_medications(pharmacy_id: int):
+    pharmacy_user = await get_current_pharmacy_user(pharmacy_id)
+    hospital_name = pharmacy_user.get("hospital_name")
+
+    prescriptions = await db.get_pharmacy_prescriptions(hospital_name, None)
+    relevant_prescriptions = [
+        p for p in prescriptions
+        if p.get("patient_id") is not None
+        and (p.get("hospital_name") == hospital_name or not p.get("hospital_name"))
+        and (p.get("pharmacy_id") in (None, pharmacy_id))
+    ]
+
+    if not relevant_prescriptions:
+        return []
+
+    invoices = await db.get_pharmacy_invoices_by_pharmacy(pharmacy_id)
+    latest_invoice_by_prescription: Dict[int, Dict[str, Any]] = {}
+    for inv in invoices:
+        presc_id = inv.get("prescription_id")
+        if not presc_id:
+            continue
+        current = latest_invoice_by_prescription.get(presc_id)
+        if not current or (inv.get("generated_at") or "") > (current.get("generated_at") or ""):
+            latest_invoice_by_prescription[presc_id] = inv
+
+    patient_summary: Dict[int, Dict[str, Any]] = {}
+    for raw_prescription in relevant_prescriptions:
+        patient_id = raw_prescription.get("patient_id")
+        if patient_id is None:
+            continue
+        view = map_prescription_to_view(raw_prescription)
+        summary = patient_summary.get(patient_id)
+        if not summary:
+            summary = {
+                "patient_id": patient_id,
+                "patient_name": view.patient_name or "",
+                "patient_phone": view.patient_phone,
+                "total_prescriptions": 0,
+                "pending_prescriptions": 0,
+                "last_prescription_id": None,
+                "last_prescription_status": None,
+                "last_visit_date": None,
+                "last_updated_at": None,
+                "last_medications": [],
+                "last_invoice_id": None,
+                "last_invoice_number": None,
+                "last_invoice_total": None,
+                "last_invoice_status": None,
+                "last_invoice_date": None,
+            }
+            patient_summary[patient_id] = summary
+
+        summary["total_prescriptions"] += 1
+        if (view.status or "").lower() in {"pending", "preparing", "ready"}:
+            summary["pending_prescriptions"] += 1
+
+        timestamp = (view.updated_at or view.created_at or "")
+        last_timestamp = summary.get("last_updated_at") or ""
+        if timestamp > last_timestamp:
+            prescription_date = (view.visit_date or view.created_at or "")[:10] if (view.visit_date or view.created_at) else None
+            summary.update({
+                "last_prescription_id": view.id,
+                "last_prescription_status": view.status,
+                "last_visit_date": prescription_date,
+                "last_updated_at": timestamp,
+                "last_medications": view.medications_json or [],
+            })
+
+            invoice = latest_invoice_by_prescription.get(view.id)
+            if invoice:
+                summary.update({
+                    "last_invoice_id": invoice.get("id"),
+                    "last_invoice_number": invoice.get("invoice_number"),
+                    "last_invoice_total": safe_float(invoice.get("total_amount")),
+                    "last_invoice_status": invoice.get("status"),
+                    "last_invoice_date": (invoice.get("generated_at") or "")[:10] if invoice.get("generated_at") else None,
+                })
+            else:
+                summary.update({
+                    "last_invoice_id": None,
+                    "last_invoice_number": None,
+                    "last_invoice_total": None,
+                    "last_invoice_status": None,
+                    "last_invoice_date": None,
+                })
+
+    summaries = [PharmacyPatientMedications(**summary) for summary in patient_summary.values()]
+    return sorted(summaries, key=lambda s: (s.patient_name or "").lower())
+
+
+@app.get("/pharmacy/{pharmacy_id}/patients/{patient_id}/purchase-history", response_model=PharmacyPatientDetailResponse)
+async def get_pharmacy_patient_purchase_history(pharmacy_id: int, patient_id: int):
+    pharmacy_user = await get_current_pharmacy_user(pharmacy_id)
+    hospital_name = pharmacy_user.get("hospital_name")
+
+    prescriptions = await db.get_pharmacy_prescriptions(hospital_name, None)
+    patient_prescriptions = [
+        p for p in prescriptions
+        if p.get("patient_id") == patient_id
+        and (p.get("hospital_name") == hospital_name or not p.get("hospital_name"))
+        and (p.get("pharmacy_id") in (None, pharmacy_id))
+    ]
+
+    prescription_views: List[PharmacyPrescriptionView] = [
+        map_prescription_to_view(prescription) for prescription in patient_prescriptions
+    ]
+
+    invoices = await db.get_pharmacy_invoices_by_pharmacy(pharmacy_id)
+    invoices_by_prescription: Dict[int, List[Dict[str, Any]]] = {}
+    for inv in invoices:
+        presc_id = inv.get("prescription_id")
+        if presc_id is None:
+            continue
+        invoices_by_prescription.setdefault(presc_id, []).append(inv)
+
+    history_items: List[PharmacyPurchaseHistoryItem] = []
+    for prescription_view in prescription_views:
+        records = invoices_by_prescription.get(prescription_view.id, [])
+        for inv in records:
+            meds = normalize_medication_items(inv.get("items")) or prescription_view.medications_json or []
+            history_items.append(
+                PharmacyPurchaseHistoryItem(
+                    invoice_id=inv.get("id"),
+                    invoice_number=inv.get("invoice_number", ""),
+                    prescription_id=prescription_view.id,
+                    patient_id=patient_id,
+                    patient_name=prescription_view.patient_name or "",
+                    patient_phone=prescription_view.patient_phone,
+                    total_amount=safe_float(inv.get("total_amount")) or 0.0,
+                    status=inv.get("status", "paid"),
+                    payment_method=inv.get("payment_method"),
+                    generated_at=inv.get("generated_at", datetime.now(timezone.utc).isoformat()),
+                    prescription_status=prescription_view.status,
+                    prescription_date=(prescription_view.visit_date or prescription_view.created_at or "")[:10]
+                    if (prescription_view.visit_date or prescription_view.created_at) else None,
+                    medications=meds or [],
+                    notes=inv.get("notes"),
+                )
+            )
+
+    history_items.sort(key=lambda item: item.generated_at, reverse=True)
+
+    patient_record = await db.get_patient_by_id_unrestricted(patient_id)
+    patient_name = ""
+    patient_phone = None
+    patient_email = None
+    patient_gender = None
+    patient_dob = None
+
+    if patient_record:
+        patient_name = f"{patient_record.get('first_name', '').strip()} {patient_record.get('last_name', '').strip()}".strip()
+        patient_phone = patient_record.get("phone")
+        patient_email = patient_record.get("email")
+        patient_gender = patient_record.get("gender")
+        dob_value = patient_record.get("date_of_birth")
+        if isinstance(dob_value, str):
+            patient_dob = dob_value
+        elif dob_value:
+            patient_dob = str(dob_value)
+
+    if not patient_record and not prescription_views:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Patient not found")
+
+    if not patient_name and prescription_views:
+        sample_view = prescription_views[0]
+        patient_name = sample_view.patient_name or ""
+        patient_phone = patient_phone or sample_view.patient_phone
+
+    total_prescriptions = len(prescription_views)
+    pending_prescriptions = len([
+        view for view in prescription_views if (view.status or "").lower() in {"pending", "preparing", "ready"}
+    ])
+
+    latest_prescription = None
+    if prescription_views:
+        latest_prescription = max(
+            prescription_views,
+            key=lambda view: (view.updated_at or view.created_at or "")
+        )
+
+    return PharmacyPatientDetailResponse(
+        patient_id=patient_id,
+        patient_name=patient_name,
+        patient_phone=patient_phone,
+        patient_email=patient_email,
+        patient_gender=patient_gender,
+        patient_date_of_birth=patient_dob,
+        total_prescriptions=total_prescriptions,
+        pending_prescriptions=pending_prescriptions,
+        latest_prescription=latest_prescription,
+        prescriptions=prescription_views,
+        invoices=history_items,
+    )
+
+
+@app.get("/pharmacy/{pharmacy_id}/suppliers", response_model=List[PharmacySupplierResponse])
+async def list_pharmacy_suppliers(pharmacy_id: int):
+    await get_current_pharmacy_user(pharmacy_id)
+    suppliers = await db.get_pharmacy_suppliers(pharmacy_id)
+    return [map_supplier_record(supplier) for supplier in suppliers]
+
+
+@app.post("/pharmacy/{pharmacy_id}/suppliers", response_model=PharmacySupplierResponse, status_code=status.HTTP_201_CREATED)
+async def create_pharmacy_supplier(pharmacy_id: int, supplier: PharmacySupplierCreate):
+    await get_current_pharmacy_user(pharmacy_id)
+    timestamp = datetime.now(timezone.utc).isoformat()
+    supplier_data = supplier.model_dump(exclude_none=True)
+    supplier_data.update({
+        "pharmacy_id": pharmacy_id,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    })
+    created = await db.create_pharmacy_supplier(supplier_data)
+    if not created:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create supplier")
+    return map_supplier_record(created)
+
+
+@app.put("/pharmacy/{pharmacy_id}/suppliers/{supplier_id}", response_model=PharmacySupplierResponse)
+async def update_pharmacy_supplier(pharmacy_id: int, supplier_id: int, supplier_update: PharmacySupplierUpdate):
+    await get_current_pharmacy_user(pharmacy_id)
+    update_data = supplier_update.model_dump(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields provided for update")
+
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    updated = await db.update_pharmacy_supplier(pharmacy_id, supplier_id, update_data)
+    if not updated:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Supplier not found")
+    return map_supplier_record(updated)
+
+
+@app.post("/pharmacy/{pharmacy_id}/inventory", response_model=PharmacyInventoryItem)
+async def create_inventory_item(pharmacy_id: int, inventory_item: PharmacyInventoryCreate):
+    await get_current_pharmacy_user(pharmacy_id)
+    timestamp = datetime.now(timezone.utc).isoformat()
+    item_data = inventory_item.model_dump(exclude_none=True)
+    item_data.update({
+        "pharmacy_id": pharmacy_id,
+        "created_at": timestamp,
+        "updated_at": timestamp
+    })
+
+    created_item = await db.create_pharmacy_inventory_item(item_data)
+    if not created_item:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create inventory item")
+
+    return map_inventory_item(created_item)
+
+
+@app.put("/pharmacy/{pharmacy_id}/inventory/{item_id}", response_model=PharmacyInventoryItem)
+async def update_inventory_item(pharmacy_id: int, item_id: int, inventory_update: PharmacyInventoryUpdate):
+    await get_current_pharmacy_user(pharmacy_id)
+    existing_item = await db.get_pharmacy_inventory_item_by_id(pharmacy_id, item_id)
+    if not existing_item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inventory item not found")
+
+    update_data = inventory_update.model_dump(exclude_unset=True, exclude_none=True)
+    if not update_data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields to update")
+
+    update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    await db.update_pharmacy_inventory_item(pharmacy_id, item_id, update_data)
+
+    refreshed = await db.get_pharmacy_inventory_item_by_id(pharmacy_id, item_id)
+    return map_inventory_item(refreshed or existing_item)
+
+
+@app.post("/pharmacy/{pharmacy_id}/inventory/{item_id}/adjust-stock", response_model=PharmacyInventoryItem)
+async def adjust_inventory_stock(pharmacy_id: int, item_id: int, adjustment: PharmacyInventoryAdjust):
+    await get_current_pharmacy_user(pharmacy_id)
+    if adjustment.quantity_delta == 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Quantity delta must be non-zero")
+
+    updated_item = await db.adjust_pharmacy_inventory_stock(pharmacy_id, item_id, adjustment.quantity_delta)
+    if not updated_item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inventory item not found")
+
+    return map_inventory_item(updated_item)
+
+
+@app.get("/pharmacy/{pharmacy_id}/inventory", response_model=List[PharmacyInventoryItem])
+async def list_inventory_items(pharmacy_id: int, low_stock_only: bool = False):
+    await get_current_pharmacy_user(pharmacy_id)
+    inventory_raw = await db.get_pharmacy_inventory_items(pharmacy_id)
+    inventory_items = [map_inventory_item(item) for item in inventory_raw]
+
+    if low_stock_only:
+        inventory_items = [
+            item for item in inventory_items
+            if item.reorder_level is not None and item.reorder_level > 0 and item.stock_quantity <= item.reorder_level
+        ]
+
+    return inventory_items
+
+
+@app.get("/pharmacy/{pharmacy_id}/alerts/low-stock", response_model=List[PharmacyInventoryItem])
+async def get_low_stock_alerts(pharmacy_id: int):
+    return await list_inventory_items(pharmacy_id, low_stock_only=True)
+
+
+@app.get("/pharmacy/{pharmacy_id}/reports/sales", response_model=dict)
+async def get_pharmacy_sales_report(
+    pharmacy_id: int,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None
+):
+    await get_current_pharmacy_user(pharmacy_id)
+
+    if start_date:
+        try:
+            datetime.strptime(start_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="start_date must be YYYY-MM-DD")
+
+    if end_date:
+        try:
+            datetime.strptime(end_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="end_date must be YYYY-MM-DD")
+
+    summary = await db.get_pharmacy_invoice_summary(pharmacy_id, start_date=start_date, end_date=end_date)
+    invoices_raw = await db.get_pharmacy_invoices_by_pharmacy(pharmacy_id)
+
+    if start_date or end_date:
+        invoices_filtered = []
+        for invoice in invoices_raw:
+            generated_at = invoice.get("generated_at") or ""
+            date_part = generated_at[:10]
+            if start_date and date_part < start_date:
+                continue
+            if end_date and date_part > end_date:
+                continue
+            invoices_filtered.append(invoice)
+        invoices_raw = invoices_filtered
+
+    invoices = [map_invoice_to_response(invoice).model_dump() for invoice in invoices_raw]
+    return {"summary": summary, "invoices": invoices}
+
+
+@app.get("/pharmacy/{pharmacy_id}/prescriptions/stats", response_model=dict)
+async def get_pharmacy_prescription_stats(pharmacy_id: int):
+    pharmacy_user = await get_current_pharmacy_user(pharmacy_id)
+    hospital_name = pharmacy_user["hospital_name"]
+    
+    # Get all prescriptions for this hospital (debug)
+    all_prescriptions = await db.get_pharmacy_prescriptions(hospital_name, None)
+    # Filter to show those relevant to this pharmacy
+    relevant_prescriptions = [
+        p for p in all_prescriptions 
+        if p.get("pharmacy_id") is None or p.get("pharmacy_id") == pharmacy_id
+    ]
+
+    stats: Dict[str, int] = {
+        "pending": 0,
+        "preparing": 0,
+        "ready": 0,
+        "dispensed": 0,
+        "cancelled": 0
+    }
+
+    for prescription in relevant_prescriptions:
+        status_value = (prescription.get("status") or "pending").lower()
+        if status_value in stats:
+            stats[status_value] += 1
+        else:
+            stats.setdefault(status_value, 0)
+            stats[status_value] += 1
+
+    return {
+        "counts": stats, 
+        "total": len(relevant_prescriptions),
+        "hospital_name": hospital_name,
+        "pharmacy_id": pharmacy_id,
+        "debug_info": {
+            "total_hospital_prescriptions": len(all_prescriptions),
+            "relevant_prescriptions": len(relevant_prescriptions),
+            "sample_prescriptions": [
+                {
+                    "id": p.get("id"),
+                    "hospital_name": p.get("hospital_name"),
+                    "pharmacy_id": p.get("pharmacy_id"),
+                    "status": p.get("status"),
+                    "patient_name": p.get("patient_name"),
+                    "created_at": p.get("created_at")
+                }
+                for p in all_prescriptions[:3]
+            ]
+        }
+    }
+
 # Frontdesk Dashboard Routes
 @app.get("/frontdesk/{frontdesk_id}/doctors", response_model=List[DoctorWithPatientCount])
 async def get_hospital_doctors(frontdesk_id: int):
@@ -1541,72 +3014,136 @@ async def get_hospital_dashboard(frontdesk_id: int):
         frontdesk_user = await get_current_frontdesk_user(frontdesk_id)
         hospital_name = frontdesk_user["hospital_name"]
         
-        print(f"Fetching dashboard data for hospital: {hospital_name}")
+        print(f"🚀 Fetching dashboard data for hospital: {hospital_name} (optimized)")
         
-        # Get doctors with patient counts
-        doctors = await db.get_doctors_with_patient_count_by_hospital(hospital_name)
+        # Try to use the ultra-optimized single-query dashboard method
+        dashboard_data = await db.get_hospital_dashboard_optimized(hospital_name, recent_limit=20)
         
-        # Get recent patients (limit to 20 most recent)
-        patients = await db.get_patients_with_doctor_info_by_hospital(hospital_name)
-        # Sort by created_at desc and take first 20
-        recent_patients = sorted(patients, key=lambda x: x.get("created_at", ""), reverse=True)[:20]
-        
-        # Convert doctors to response models
-        doctor_responses = []
-        for doctor in doctors:
-            doctor_response = DoctorWithPatientCount(
-                id=doctor["id"],
-                firebase_uid=doctor["firebase_uid"],
-                email=doctor["email"],
-                first_name=doctor["first_name"],
-                last_name=doctor["last_name"],
-                specialization=doctor.get("specialization"),
-                license_number=doctor.get("license_number"),
-                phone=doctor.get("phone"),
-                hospital_name=doctor.get("hospital_name"),
-                patient_count=doctor["patient_count"],
-                created_at=doctor["created_at"],
-                updated_at=doctor["updated_at"]
+        if dashboard_data:
+            # Dashboard loaded with single query! Parse the JSON response
+            print(f"✅ Dashboard loaded with 1 query!")
+            
+            # Convert doctors from dashboard data
+            doctor_responses = []
+            for doctor in dashboard_data.get('doctors', []):
+                doctor_response = DoctorWithPatientCount(
+                    id=doctor["id"],
+                    firebase_uid=doctor["firebase_uid"],
+                    email=doctor["email"],
+                    first_name=doctor["first_name"],
+                    last_name=doctor["last_name"],
+                    specialization=doctor.get("specialization"),
+                    license_number=doctor.get("license_number"),
+                    phone=doctor.get("phone"),
+                    hospital_name=doctor.get("hospital_name"),
+                    patient_count=doctor.get("patient_count", 0),
+                    created_at=doctor["created_at"],
+                    updated_at=doctor["updated_at"]
+                )
+                doctor_responses.append(doctor_response)
+            
+            # Convert patients from dashboard data
+            patient_responses = []
+            for patient in dashboard_data.get('recent_patients', []):
+                patient_response = PatientWithDoctorInfo(
+                    id=patient["id"],
+                    first_name=patient["first_name"],
+                    last_name=patient["last_name"],
+                    email=patient.get("email"),
+                    phone=patient["phone"],
+                    date_of_birth=patient["date_of_birth"],
+                    gender=patient["gender"],
+                    address=patient.get("address"),
+                    blood_group=patient.get("blood_group"),
+                    allergies=patient.get("allergies"),
+                    medical_history=patient.get("medical_history"),
+                    doctor_name=f"{patient.get('doctor_first_name', '')} {patient.get('doctor_last_name', '')}".strip(),
+                    doctor_specialization=patient.get("doctor_specialization", ""),
+                    doctor_phone=patient.get("doctor_phone", ""),
+                    created_at=patient["created_at"],
+                    updated_at=patient["updated_at"]
+                )
+                patient_responses.append(patient_response)
+            
+            dashboard_response = HospitalDashboardResponse(
+                hospital_name=hospital_name,
+                total_doctors=dashboard_data.get('total_doctors', 0),
+                total_patients=dashboard_data.get('total_patients', 0),
+                doctors=doctor_responses,
+                recent_patients=patient_responses
             )
-            doctor_responses.append(doctor_response)
-        
-        # Convert patients to response models
-        patient_responses = []
-        for patient in recent_patients:
-            patient_response = PatientWithDoctorInfo(
-                id=patient["id"],
-                first_name=patient["first_name"],
-                last_name=patient["last_name"],
-                email=patient.get("email"),
-                phone=patient["phone"],
-                date_of_birth=patient["date_of_birth"],
-                gender=patient["gender"],
-                address=patient.get("address"),
-                blood_group=patient.get("blood_group"),
-                allergies=patient.get("allergies"),
-                medical_history=patient.get("medical_history"),
-                doctor_name=patient["doctor_name"],
-                doctor_specialization=patient["doctor_specialization"],
-                doctor_phone=patient["doctor_phone"],
-                created_at=patient["created_at"],
-                updated_at=patient["updated_at"]
+            
+            print(f"✅ Returning optimized dashboard for {hospital_name}: {dashboard_data.get('total_doctors')} doctors, {dashboard_data.get('total_patients')} patients")
+            return dashboard_response
+            
+        else:
+            # Fallback to old method if optimized function not available
+            print(f"⚠️ Using fallback method for dashboard (multiple queries)")
+            
+            # Get doctors with patient counts
+            doctors = await db.get_doctors_with_patient_count_by_hospital(hospital_name)
+            
+            # Get recent patients (limit to 20 most recent)
+            patients = await db.get_patients_with_doctor_info_by_hospital(hospital_name)
+            # Sort by created_at desc and take first 20
+            recent_patients = sorted(patients, key=lambda x: x.get("created_at", ""), reverse=True)[:20]
+            
+            # Convert doctors to response models
+            doctor_responses = []
+            for doctor in doctors:
+                doctor_response = DoctorWithPatientCount(
+                    id=doctor["id"],
+                    firebase_uid=doctor["firebase_uid"],
+                    email=doctor["email"],
+                    first_name=doctor["first_name"],
+                    last_name=doctor["last_name"],
+                    specialization=doctor.get("specialization"),
+                    license_number=doctor.get("license_number"),
+                    phone=doctor.get("phone"),
+                    hospital_name=doctor.get("hospital_name"),
+                    patient_count=doctor["patient_count"],
+                    created_at=doctor["created_at"],
+                    updated_at=doctor["updated_at"]
+                )
+                doctor_responses.append(doctor_response)
+            
+            # Convert patients to response models
+            patient_responses = []
+            for patient in recent_patients:
+                patient_response = PatientWithDoctorInfo(
+                    id=patient["id"],
+                    first_name=patient["first_name"],
+                    last_name=patient["last_name"],
+                    email=patient.get("email"),
+                    phone=patient["phone"],
+                    date_of_birth=patient["date_of_birth"],
+                    gender=patient["gender"],
+                    address=patient.get("address"),
+                    blood_group=patient.get("blood_group"),
+                    allergies=patient.get("allergies"),
+                    medical_history=patient.get("medical_history"),
+                    doctor_name=patient["doctor_name"],
+                    doctor_specialization=patient["doctor_specialization"],
+                    doctor_phone=patient["doctor_phone"],
+                    created_at=patient["created_at"],
+                    updated_at=patient["updated_at"]
+                )
+                patient_responses.append(patient_response)
+            
+            # Calculate totals
+            total_doctors = len(doctor_responses)
+            total_patients = sum(doctor["patient_count"] for doctor in doctors)
+            
+            dashboard_response = HospitalDashboardResponse(
+                hospital_name=hospital_name,
+                total_doctors=total_doctors,
+                total_patients=total_patients,
+                doctors=doctor_responses,
+                recent_patients=patient_responses
             )
-            patient_responses.append(patient_response)
-        
-        # Calculate totals
-        total_doctors = len(doctor_responses)
-        total_patients = sum(doctor["patient_count"] for doctor in doctors)
-        
-        dashboard_response = HospitalDashboardResponse(
-            hospital_name=hospital_name,
-            total_doctors=total_doctors,
-            total_patients=total_patients,
-            doctors=doctor_responses,
-            recent_patients=patient_responses
-        )
-        
-        print(f"Returning dashboard for {hospital_name}: {total_doctors} doctors, {total_patients} patients")
-        return dashboard_response
+            
+            print(f"Returning dashboard for {hospital_name}: {total_doctors} doctors, {total_patients} patients")
+            return dashboard_response
         
     except HTTPException:
         raise
@@ -2784,6 +4321,15 @@ async def create_visit(
                 "lab_requests_created": len(lab_requests_created),
                 "lab_requests": lab_requests_created
             }
+
+            try:
+                print(f"🔍 DEBUG: About to sync pharmacy prescription for visit {visit_id}")
+                print(f"🔍 DEBUG: Visit medications: {created_visit.get('medications')}")
+                print(f"🔍 DEBUG: Doctor hospital: {current_doctor.get('hospital_name')}")
+                await sync_pharmacy_prescription_from_visit(created_visit, current_doctor, existing_patient)
+            except Exception as pharmacy_sync_error:
+                print(f"❌ ERROR: Could not sync pharmacy prescription for visit {visit_id}: {pharmacy_sync_error}")
+                print(f"Traceback: {traceback.format_exc()}")
             
             # If handwritten is selected, add template info to response
             if visit.note_input_type == "handwritten" and visit.selected_template_id:
@@ -2878,6 +4424,15 @@ async def update_visit(
     
     success = await db.update_visit(visit_id, current_doctor["firebase_uid"], update_data)
     if success:
+        if "medications" in update_data:
+            try:
+                updated_visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+                patient = await db.get_patient_by_id(existing_visit["patient_id"], current_doctor["firebase_uid"])
+                if updated_visit and patient:
+                    await sync_pharmacy_prescription_from_visit(updated_visit, current_doctor, patient)
+            except Exception as pharmacy_sync_error:
+                print(f"Warning: could not sync pharmacy prescription after update for visit {visit_id}: {pharmacy_sync_error}")
+                print(f"Traceback: {traceback.format_exc()}")
         return {"message": "Visit updated successfully"}
     else:
         raise HTTPException(
@@ -3369,7 +4924,7 @@ async def download_handwritten_note(
                 detail="Handwritten note not found"
             )
         
-        # Download file from Supabase Storage
+        # Download file from Supabase Storage using async non-blocking download
         storage_path = note["storage_path"]
         if not storage_path:
             raise HTTPException(
@@ -3377,11 +4932,12 @@ async def download_handwritten_note(
                 detail="File storage path not found"
             )
         
-        loop = asyncio.get_event_loop()
         try:
-            file_response = await loop.run_in_executor(
-                None,
-                lambda: supabase.storage.from_("medical-reports").download(storage_path)
+            # Use async downloader to prevent blocking during file download
+            file_response = await file_downloader.download_from_supabase_storage(
+                supabase_client=supabase,
+                bucket_name="medical-reports",
+                file_path=storage_path
             )
             
             if not file_response:
@@ -3661,7 +5217,7 @@ async def send_whatsapp_report_link(
             )
         
         # Generate the full upload URL
-        base_url = os.getenv("PUBLIC_BASE_URL", "https://benz-patient-authors-drill.trycloudflare.com")
+        base_url = os.getenv("PUBLIC_BASE_URL", "https://backend-app-wwld.onrender.com")
         upload_url = f"{base_url.rstrip('/')}/upload-reports/{upload_token}"
         
         # Prepare response data
@@ -6752,18 +8308,21 @@ async def analyze_report_with_ai(
                 detail="Visit or patient information not found"
             )
         
-        # Download the file from storage for analysis
+        # Download the file from storage for analysis using async non-blocking download
         file_url = report["file_url"]
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(file_url)
-                if response.status_code == 200:
-                    file_content = response.content
-                else:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail="Report file not accessible"
-                    )
+            # Use async file downloader to prevent blocking during download
+            file_content = await file_downloader.download_file(
+                url=file_url,
+                stream=True  # Use streaming for large files
+            )
+            
+            if not file_content:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Report file not accessible"
+                )
+                
         except Exception as download_error:
             print(f"Error downloading file for analysis: {download_error}")
             raise HTTPException(
@@ -6785,7 +8344,7 @@ async def analyze_report_with_ai(
         processing_time = (datetime.now() - start_time).total_seconds() * 1000
         
         if analysis_result["success"]:
-            # Store analysis in database
+            # Store analysis in database with enhanced visit-contextual fields
             analysis_data = {
                 "report_id": report_id,
                 "visit_id": report["visit_id"],
@@ -6795,6 +8354,12 @@ async def analyze_report_with_ai(
                 "model_used": analysis_result["model_used"],
                 "confidence_score": analysis_result["analysis"]["confidence_score"],
                 "raw_analysis": analysis_result["analysis"]["raw_analysis"],
+                # Enhanced visit-contextual fields
+                "clinical_correlation": analysis_result["analysis"]["structured_analysis"].get("clinical_correlation"),
+                "detailed_findings": analysis_result["analysis"]["structured_analysis"].get("detailed_findings"),
+                "critical_findings": analysis_result["analysis"]["structured_analysis"].get("critical_findings"),
+                "treatment_evaluation": analysis_result["analysis"]["structured_analysis"].get("treatment_evaluation"),
+                # Original fields (keeping for backward compatibility)
                 "document_summary": analysis_result["analysis"]["structured_analysis"].get("document_summary"),
                 "clinical_significance": analysis_result["analysis"]["structured_analysis"].get("clinical_significance"),
                 "correlation_with_patient": analysis_result["analysis"]["structured_analysis"].get("correlation_with_patient"),
@@ -6913,24 +8478,30 @@ async def analyze_visit_reports_consolidated(
                     "already_exists": True
                 }
         
-        # Download and prepare documents for analysis
+        # Download and prepare documents for analysis using async non-blocking downloads
         documents = []
+        
+        # Use concurrent downloads to speed up multiple file downloads
+        file_urls = [report["file_url"] for report in reports]
+        downloaded_files = await file_downloader.download_multiple_files(
+            urls=file_urls,
+            concurrent_limit=5  # Download max 5 files at once
+        )
+        
+        # Process downloaded files
         for report in reports:
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(report["file_url"])
-                    if response.status_code == 200:
-                        documents.append({
-                            "content": response.content,
-                            "file_name": report["file_name"],
-                            "file_type": report["file_type"],
-                            "test_type": report.get("test_type", "General Report")
-                        })
-                    else:
-                        print(f"Failed to download report {report['id']}: {response.status_code}")
-            except Exception as download_error:
-                print(f"Error downloading report {report['id']}: {download_error}")
-                continue
+            file_url = report["file_url"]
+            file_content = downloaded_files.get(file_url)
+            
+            if file_content:
+                documents.append({
+                    "content": file_content,
+                    "file_name": report["file_name"],
+                    "file_type": report["file_type"],
+                    "test_type": report.get("test_type", "General Report")
+                })
+            else:
+                print(f"⚠️ Failed to download report {report['id']}")
         
         if not documents:
             raise HTTPException(
@@ -7333,7 +8904,6 @@ async def analyze_patient_comprehensive_history(
             analysis_is_outdated = False
             if existing_analysis.get("total_visits", 0) != len(visits) or existing_analysis.get("total_reports", 0) != len(reports):
                 analysis_is_outdated = True
-                print(f"Analysis outdated: visits changed from {existing_analysis.get('total_visits', 0)} to {len(visits)}, reports changed from {existing_analysis.get('total_reports', 0)} to {len(reports)}")
             
             # Return cached analysis only if it's recent AND data hasn't changed
             if time_diff.total_seconds() < 24 * 3600 and not analysis_is_outdated:  # Less than 24 hours old and data unchanged
@@ -7345,7 +8915,6 @@ async def analyze_patient_comprehensive_history(
                 }
             elif analysis_is_outdated:
                 # Delete the outdated analysis to force regeneration
-                print(f"Deleting outdated analysis for patient {patient_id}")
                 await db.delete_patient_history_analysis(existing_analysis["id"], current_doctor["firebase_uid"])
         
         # Get all patient visits
@@ -7378,41 +8947,33 @@ async def analyze_patient_comprehensive_history(
                 detail="No medical data found for this patient in the specified period"
             )
         
-        # Download report files for comprehensive analysis (OPTIMIZED: concurrent downloads)
-        print(f"Downloading {len(reports)} report files concurrently...")
+        # Download report files for comprehensive analysis using async non-blocking downloads
+        report_documents = []
         
-        async def download_single_report(report):
-            """Download a single report file"""
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.get(report["file_url"])
-                    if response.status_code == 200:
-                        return {
-                            "content": response.content,
-                            "file_name": report["file_name"],
-                            "file_type": report["file_type"],
-                            "test_type": report.get("test_type", "General Report"),
-                            "uploaded_at": report["uploaded_at"],
-                            "visit_id": report["visit_id"]
-                        }
-                    else:
-                        print(f"Failed to download report {report['id']}: {response.status_code}")
-                        return None
-            except Exception as download_error:
-                print(f"Error downloading report {report['id']}: {download_error}")
-                return None
-        
-        # Download all reports concurrently (prevents N sequential downloads)
-        download_tasks = [download_single_report(report) for report in reports]
-        download_results = await asyncio.gather(*download_tasks, return_exceptions=True)
-        
-        # Filter out failed downloads and exceptions
-        report_documents = [
-            result for result in download_results 
-            if result is not None and not isinstance(result, Exception)
-        ]
-        
-        print(f"Successfully downloaded {len(report_documents)}/{len(reports)} reports")
+        if reports:
+            # Use concurrent downloads to speed up multiple file downloads
+            file_urls = [report["file_url"] for report in reports]
+            downloaded_files = await file_downloader.download_multiple_files(
+                urls=file_urls,
+                concurrent_limit=5  # Download max 5 files at once
+            )
+            
+            # Process downloaded files
+            for report in reports:
+                file_url = report["file_url"]
+                file_content = downloaded_files.get(file_url)
+                
+                if file_content:
+                    report_documents.append({
+                        "content": file_content,
+                        "file_name": report["file_name"],
+                        "file_type": report["file_type"],
+                        "test_type": report.get("test_type", "General Report"),
+                        "uploaded_at": report["uploaded_at"],
+                        "visit_id": report["visit_id"]
+                    })
+                else:
+                    print(f"⚠️ Failed to download report {report['id']}")
         
         # Perform comprehensive patient history analysis
         analysis_result = await ai_analysis_service.analyze_patient_comprehensive_history(
@@ -7484,6 +9045,7 @@ async def analyze_patient_comprehensive_history(
             }
             
             created_analysis = await db.create_patient_history_analysis(analysis_data)
+            
             if created_analysis:
                 return {
                     "message": "Comprehensive patient history analysis completed successfully",
@@ -7556,6 +9118,7 @@ async def get_patient_history_analysis(
             )
         
         analysis = await db.get_latest_patient_history_analysis(patient_id, current_doctor["firebase_uid"])
+        
         if not analysis:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -7599,6 +9162,75 @@ async def get_patient_history_analyses(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to fetch patient history analyses"
         )
+
+@app.post("/patients/{patient_id}/cleanup-history-analyses", response_model=dict)
+async def cleanup_patient_history_analyses(
+    patient_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """Clean up/delete all patient history analyses for a specific patient (for testing/debugging)"""
+    try:
+        success = await db.delete_patient_history_analyses_by_patient(patient_id, current_doctor["firebase_uid"])
+        if success:
+            return {
+                "message": f"Successfully cleaned up all history analyses for patient {patient_id}",
+                "patient_id": patient_id
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No analyses found to clean up"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error cleaning up patient history analyses: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clean up patient history analyses"
+        )
+
+@app.get("/patients/{patient_id}/history-analysis-debug", response_model=dict)
+async def debug_patient_history_analysis(
+    patient_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """DEBUG: Get raw analysis data directly from database"""
+    try:
+        analysis = await db.get_latest_patient_history_analysis(patient_id, current_doctor["firebase_uid"])
+        
+        if not analysis:
+            return {
+                "found": False,
+                "message": "No analysis found in database",
+                "patient_id": patient_id
+            }
+        
+        return {
+            "found": True,
+            "analysis_id": analysis.get('id'),
+            "patient_id": analysis.get('patient_id'),
+            "analyzed_at": analysis.get('analyzed_at'),
+            "total_visits": analysis.get('total_visits'),
+            "total_reports": analysis.get('total_reports'),
+            "analysis_success": analysis.get('analysis_success'),
+            "raw_analysis_length": len(analysis.get('raw_analysis', '')),
+            "raw_analysis_preview": analysis.get('raw_analysis', '')[:500],
+            "comprehensive_summary_length": len(analysis.get('comprehensive_summary', '') or ''),
+            "comprehensive_summary": analysis.get('comprehensive_summary'),
+            "medical_trajectory": analysis.get('medical_trajectory'),
+            "chronic_conditions": analysis.get('chronic_conditions'),
+            "recommendations": analysis.get('recommendations'),
+            "all_fields": list(analysis.keys())
+        }
+        
+    except Exception as e:
+        print(f"Error in debug endpoint: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        return {
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 @app.post("/patients/{patient_id}/cleanup-history-analyses", response_model=dict)
 async def cleanup_patient_history_analyses(
@@ -8749,8 +10381,6 @@ async def lab_upload_reports(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to upload lab reports"
         )
-
-
 
 if __name__ == "__main__":
     import uvicorn

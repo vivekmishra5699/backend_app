@@ -1,5 +1,4 @@
 import asyncio
-import concurrent.futures
 import os
 from typing import Optional, Dict, Any
 import traceback
@@ -8,6 +7,7 @@ import firebase_admin
 from firebase_admin import credentials
 from functools import lru_cache
 import time
+from thread_pool_manager import get_executor
 
 
 # Custom exceptions for better error handling
@@ -26,9 +26,9 @@ class TokenVerificationError(Exception):
 
 class AsyncFirebaseManager:
     def __init__(self):
-        # Consider CPU count for better defaults
-        max_workers = int(os.getenv("FIREBASE_MAX_WORKERS", min(32, (os.cpu_count() or 1) * 4)))
-        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        # Use unified thread pool instead of creating a new one
+        self.executor = get_executor()
+        print("✅ Firebase Manager using unified thread pool")
     
     async def verify_id_token(self, id_token: str) -> Optional[Dict[str, Any]]:
         """Verify Firebase ID token asynchronously with better error handling"""
