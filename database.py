@@ -100,6 +100,13 @@ class DatabaseManager:
                 self.executor, 
                 lambda: self.supabase.table("doctors").update(update_data).eq("firebase_uid", firebase_uid).execute()
             )
+            
+            # Invalidate cache after successful update
+            if response.data and self.cache:
+                cache_key = f"doctor_uid:{firebase_uid}"
+                await self.cache.delete(cache_key)
+                print(f"Cache invalidated for doctor: {firebase_uid}")
+            
             return bool(response.data)
         except Exception as e:
             print(f"Error updating doctor: {e}")
