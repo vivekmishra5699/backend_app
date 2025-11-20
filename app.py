@@ -4242,12 +4242,20 @@ async def create_visit(
                             
                             # Create lab report request if lab contact exists
                             if lab_phone:
+                                # Ensure we have a valid lab_contact_id from the table
+                                lab_contact_id = await db.ensure_lab_contact_exists(
+                                    current_doctor["firebase_uid"], 
+                                    lab_phone, 
+                                    lab_name, 
+                                    report_type
+                                )
+                                
                                 request_token = str(uuid.uuid4())
                                 request_data = {
                                     "visit_id": visit_id,
                                     "patient_id": visit.patient_id,
                                     "doctor_firebase_uid": current_doctor["firebase_uid"],
-                                    "lab_contact_id": None,  # NULL for profile-based requests
+                                    "lab_contact_id": lab_contact_id,  # Link to actual lab contact
                                     "patient_name": f"{patient['first_name']} {patient['last_name']}",
                                     "report_type": report_type,
                                     "test_name": test_name.strip(),
@@ -9667,12 +9675,20 @@ async def auto_create_lab_requests_for_visit(
             
             # Create lab report request if lab contact exists
             if lab_phone:
+                # Ensure we have a valid lab_contact_id from the table
+                lab_contact_id = await db.ensure_lab_contact_exists(
+                    current_doctor["firebase_uid"], 
+                    lab_phone, 
+                    lab_name, 
+                    report_type
+                )
+
                 request_token = str(uuid.uuid4())
                 request_data = {
                     "visit_id": visit_id,
                     "patient_id": visit["patient_id"],
                     "doctor_firebase_uid": current_doctor["firebase_uid"],
-                    "lab_contact_id": None,  # NULL for profile-based requests
+                    "lab_contact_id": lab_contact_id,
                     "patient_name": f"{patient['first_name']} {patient['last_name']}",
                     "report_type": report_type,
                     "test_name": test_name.strip(),
@@ -9782,12 +9798,20 @@ async def request_lab_report(
         import uuid
         request_token = str(uuid.uuid4())
         
-        # Create lab report request (lab_contact_id will be NULL for profile-based requests)
+        # Ensure we have a valid lab_contact_id from the table
+        lab_contact_id = await db.ensure_lab_contact_exists(
+            current_doctor["firebase_uid"], 
+            lab_phone, 
+            lab_name, 
+            report_type
+        )
+        
+        # Create lab report request
         request_data = {
             "visit_id": visit_id,
             "patient_id": visit["patient_id"],
             "doctor_firebase_uid": current_doctor["firebase_uid"],
-            "lab_contact_id": None,  # NULL for profile-based requests
+            "lab_contact_id": lab_contact_id,
             "patient_name": f"{patient['first_name']} {patient['last_name']}",
             "report_type": report_type,
             "test_name": test_name,

@@ -687,7 +687,7 @@ class DatabaseManager:
         """Delete all AI analyses for a visit and return count of deleted items"""
         try:
             total_deleted = 0
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_event_loop();
             
             # Delete AI document analyses for this visit
             try:
@@ -2159,6 +2159,37 @@ class DatabaseManager:
             return None
         except Exception as e:
             print(f"Error getting lab contact by phone: {e}")
+            return None
+
+    async def ensure_lab_contact_exists(self, doctor_uid: str, phone: str, lab_name: str, lab_type: str) -> Optional[int]:
+        """
+        Ensures a lab contact record exists for the given doctor and phone.
+        Returns the ID of the existing or newly created contact.
+        """
+        try:
+            # Check for existing contact
+            existing_contacts = await self.get_doctor_lab_contacts(doctor_uid, active_only=False)
+            matching_contact = next((c for c in existing_contacts if c["contact_phone"] == phone), None)
+            
+            if matching_contact:
+                return matching_contact["id"]
+            
+            # Create new contact
+            new_contact_data = {
+                "doctor_firebase_uid": doctor_uid,
+                "lab_type": lab_type,
+                "lab_name": lab_name,
+                "contact_phone": phone,
+                "is_active": True
+            }
+            new_contact = await self.create_lab_contact(new_contact_data)
+            if new_contact:
+                print(f"Auto-created lab contact record for {lab_name} ({phone})")
+                return new_contact["id"]
+            
+            return None
+        except Exception as e:
+            print(f"Error ensuring lab contact exists: {e}")
             return None
 
     async def create_lab_report_request(self, request_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
