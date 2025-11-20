@@ -1,16 +1,13 @@
-from supabase import Client
+from supabase import AsyncClient
 from typing import Optional, List, Dict, Any
 import traceback
 import asyncio
 from datetime import datetime, timezone
-from thread_pool_manager import get_executor
 from optimized_cache import optimized_cache
 
 class DatabaseManager:
-    def __init__(self, supabase_client: Client, enable_cache: bool = True):
+    def __init__(self, supabase_client: AsyncClient, enable_cache: bool = True):
         self.supabase = supabase_client
-        # Use unified thread pool instead of creating a new one
-        self.executor = get_executor()
         self.cache = optimized_cache if enable_cache else None
         if self.cache:
             print("✅ Optimized query cache enabled (5000 entries, 200MB)")
@@ -28,12 +25,8 @@ class DatabaseManager:
             
             print(f"Fetching doctor by Firebase UID: {firebase_uid}")
             
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("doctors").select("*").eq("firebase_uid", firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("doctors").select("*").eq("firebase_uid", firebase_uid).execute()
             print(f"Supabase response for UID lookup: {response}")
             
             result = response.data[0] if response.data else None
@@ -54,12 +47,8 @@ class DatabaseManager:
         try:
             print(f"Fetching doctor by email: {email}")
             
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("doctors").select("*").eq("email", email).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("doctors").select("*").eq("email", email).execute()
             print(f"Supabase response for email lookup: {response}")
             
             if response.data:
@@ -75,12 +64,8 @@ class DatabaseManager:
         try:
             print(f"Inserting doctor data to Supabase: {doctor_data}")
             
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("doctors").insert(doctor_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("doctors").insert(doctor_data).execute()
             print(f"Supabase insert response: {response}")
             
             if response.data:
@@ -198,12 +183,8 @@ class DatabaseManager:
         try:
             print(f"Fetching patient by ID: {patient_id} for doctor: {doctor_firebase_uid}")
             
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("patients").select("*").eq("id", patient_id).eq("created_by_doctor", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("patients").select("*").eq("id", patient_id).eq("created_by_doctor", doctor_firebase_uid).execute()
             print(f"Supabase response for patient lookup: {response}")
             
             if response.data:
@@ -217,15 +198,7 @@ class DatabaseManager:
     async def get_patient_by_id_unrestricted(self, patient_id: int) -> Optional[Dict[str, Any]]:
         """Get patient by ID without doctor scoping (for pharmacy views)."""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("patients")
-                .select("*")
-                .eq("id", patient_id)
-                .limit(1)
-                .execute()
-            )
+            response = await self.supabase.table("patients").select("*").eq("id", patient_id).limit(1).execute()
             if response.data:
                 return response.data[0]
             return None
@@ -236,12 +209,8 @@ class DatabaseManager:
     async def get_all_patients_for_doctor(self, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all patients for a specific doctor"""
         try:
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("patients").select("*").eq("created_by_doctor", doctor_firebase_uid).order("created_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("patients").select("*").eq("created_by_doctor", doctor_firebase_uid).order("created_at", desc=True).execute()
             return response.data if response.data else []
         except Exception as e:
             print(f"Error fetching patients: {e}")
@@ -253,12 +222,8 @@ class DatabaseManager:
         try:
             print(f"Inserting patient data to Supabase: {patient_data}")
             
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("patients").insert(patient_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("patients").insert(patient_data).execute()
             print(f"Supabase insert response: {response}")
             
             if response.data:
@@ -272,12 +237,8 @@ class DatabaseManager:
     async def update_patient(self, patient_id: int, doctor_firebase_uid: str, update_data: Dict[str, Any]) -> bool:
         """Update patient profile"""
         try:
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("patients").update(update_data).eq("id", patient_id).eq("created_by_doctor", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("patients").update(update_data).eq("id", patient_id).eq("created_by_doctor", doctor_firebase_uid).execute()
             return bool(response.data)
         except Exception as e:
             print(f"Error updating patient: {e}")
@@ -290,12 +251,8 @@ class DatabaseManager:
         try:
             print(f"Fetching visits for patient: {patient_id} by doctor: {doctor_firebase_uid}")
             
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visits").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("visit_date", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("visits").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("visit_date", desc=True).execute()
             print(f"Supabase response for visits lookup: {response}")
             
             return response.data if response.data else []
@@ -307,12 +264,8 @@ class DatabaseManager:
     async def get_visit_by_id(self, visit_id: int, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
         """Get visit by ID for a specific doctor"""
         try:
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visits").select("*").eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("visits").select("*").eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             
             if response.data:
                 return response.data[0]
@@ -327,12 +280,8 @@ class DatabaseManager:
         try:
             print(f"Inserting visit data to Supabase: {visit_data}")
             
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visits").insert(visit_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("visits").insert(visit_data).execute()
             print(f"Supabase insert response: {response}")
             
             if response.data:
@@ -346,12 +295,8 @@ class DatabaseManager:
     async def update_visit(self, visit_id: int, doctor_firebase_uid: str, update_data: Dict[str, Any]) -> bool:
         """Update visit record"""
         try:
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visits").update(update_data).eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("visits").update(update_data).eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             return bool(response.data)
         except Exception as e:
             print(f"Error updating visit: {e}")
@@ -363,70 +308,47 @@ class DatabaseManager:
         try:
             print(f"Deleting visit {visit_id} for doctor {doctor_firebase_uid}")
             
-            loop = asyncio.get_event_loop()
-            
             # Get the patient_id before deleting the visit (needed for cleanup)
-            visit_data = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visits").select("patient_id").eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            visit_data = await self.supabase.table("visits").select("patient_id").eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             patient_id = visit_data.data[0]["patient_id"] if visit_data.data else None
             
             # Delete AI document analyses for this visit (if table exists)
             try:
-                ai_analyses_response = await loop.run_in_executor(
-                    self.executor, 
-                    lambda: self.supabase.table("ai_document_analysis").delete().eq("visit_id", visit_id).execute()
-                )
+                ai_analyses_response = await self.supabase.table("ai_document_analysis").delete().eq("visit_id", visit_id).execute()
                 print(f"Deleted {len(ai_analyses_response.data if ai_analyses_response.data else [])} AI document analyses")
             except Exception as ai_error:
                 print(f"Note: Could not delete AI document analyses (table may not exist): {ai_error}")
             
             # Delete AI consolidated analyses for this visit (if table exists)
             try:
-                consolidated_response = await loop.run_in_executor(
-                    self.executor, 
-                    lambda: self.supabase.table("ai_consolidated_analysis").delete().eq("visit_id", visit_id).execute()
-                )
+                consolidated_response = await self.supabase.table("ai_consolidated_analysis").delete().eq("visit_id", visit_id).execute()
                 print(f"Deleted {len(consolidated_response.data if consolidated_response.data else [])} AI consolidated analyses")
             except Exception as consolidated_error:
                 print(f"Note: Could not delete AI consolidated analyses (table may not exist): {consolidated_error}")
             
             # Delete AI analysis queue entries for this visit (if table exists)
             try:
-                queue_response = await loop.run_in_executor(
-                    self.executor, 
-                    lambda: self.supabase.table("ai_analysis_queue").delete().eq("visit_id", visit_id).execute()
-                )
+                queue_response = await self.supabase.table("ai_analysis_queue").delete().eq("visit_id", visit_id).execute()
                 print(f"Deleted {len(queue_response.data if queue_response.data else [])} AI analysis queue entries")
             except Exception as queue_error:
                 print(f"Note: Could not delete AI analysis queue entries (table may not exist): {queue_error}")
             
             # Delete reports first (if table exists)
             try:
-                reports_response = await loop.run_in_executor(
-                    self.executor, 
-                    lambda: self.supabase.table("reports").delete().eq("visit_id", visit_id).execute()
-                )
+                reports_response = await self.supabase.table("reports").delete().eq("visit_id", visit_id).execute()
                 print(f"Deleted {len(reports_response.data if reports_response.data else [])} reports")
             except Exception as reports_error:
                 print(f"Note: Could not delete reports (table may not exist): {reports_error}")
             
             # Delete upload links (if table exists)
             try:
-                links_response = await loop.run_in_executor(
-                    self.executor, 
-                    lambda: self.supabase.table("upload_links").delete().eq("visit_id", visit_id).execute()
-                )
+                links_response = await self.supabase.table("upload_links").delete().eq("visit_id", visit_id).execute()
                 print(f"Deleted {len(links_response.data if links_response.data else [])} upload links")
             except Exception as links_error:
                 print(f"Note: Could not delete upload links (table may not exist): {links_error}")
             
             # Finally delete the visit
-            visit_response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visits").delete().eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            visit_response = await self.supabase.table("visits").delete().eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             
             if visit_response.data:
                 print(f"Successfully deleted visit {visit_id}")
@@ -451,12 +373,8 @@ class DatabaseManager:
     async def test_connection(self) -> Dict[str, Any]:
         """Test database connection"""
         try:
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("doctors").select("id").limit(1).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("doctors").select("id").limit(1).execute()
             return {
                 "status": "success",
                 "message": "Database connection OK",
@@ -495,11 +413,8 @@ class DatabaseManager:
         try:
             print(f"Creating AI analysis: {analysis_data}")
             
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("ai_document_analysis").insert(analysis_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("ai_document_analysis").insert(analysis_data).execute()
             print(f"AI analysis creation response: {response}")
             
             if response.data:
@@ -513,11 +428,8 @@ class DatabaseManager:
     async def get_ai_analysis_by_report_id(self, report_id: int, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
         """Get AI analysis for a specific report"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("ai_document_analysis").select("*").eq("report_id", report_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("ai_document_analysis").select("*").eq("report_id", report_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             
             if response.data:
                 return response.data[0]
@@ -529,11 +441,8 @@ class DatabaseManager:
     async def get_ai_analyses_by_visit_id(self, visit_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all AI analyses for a visit"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("ai_document_analysis").select("*").eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("analyzed_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("ai_document_analysis").select("*").eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("analyzed_at", desc=True).execute()
             
             return response.data if response.data else []
         except Exception as e:
@@ -543,11 +452,8 @@ class DatabaseManager:
     async def get_ai_analyses_by_patient_id(self, patient_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all AI analyses for a patient"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("ai_document_analysis").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("analyzed_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("ai_document_analysis").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("analyzed_at", desc=True).execute()
             
             return response.data if response.data else []
         except Exception as e:
@@ -559,11 +465,8 @@ class DatabaseManager:
         try:
             print(f"Creating consolidated AI analysis: {analysis_data}")
             
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("ai_consolidated_analysis").insert(analysis_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("ai_consolidated_analysis").insert(analysis_data).execute()
             
             if response.data:
                 return response.data[0]
@@ -575,11 +478,8 @@ class DatabaseManager:
     async def get_consolidated_analyses_by_visit_id(self, visit_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get consolidated AI analyses for a visit"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("ai_consolidated_analysis").select("*").eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("analyzed_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("ai_consolidated_analysis").select("*").eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("analyzed_at", desc=True).execute()
             
             return response.data if response.data else []
         except Exception as e:
@@ -589,11 +489,8 @@ class DatabaseManager:
     async def queue_ai_analysis(self, queue_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Add an AI analysis task to the queue"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("ai_analysis_queue").insert(queue_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("ai_analysis_queue").insert(queue_data).execute()
             
             if response.data:
                 return response.data[0]
@@ -605,11 +502,8 @@ class DatabaseManager:
     async def get_pending_ai_analyses(self, doctor_firebase_uid: str, limit: int = 10) -> List[Dict[str, Any]]:
         """Get pending AI analysis tasks for a doctor"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("ai_analysis_queue").select("*").eq("doctor_firebase_uid", doctor_firebase_uid).eq("status", "pending").order("priority", desc=True).order("queued_at").limit(limit).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("ai_analysis_queue").select("*").eq("doctor_firebase_uid", doctor_firebase_uid).eq("status", "pending").order("priority", desc=True).order("queued_at").limit(limit).execute()
             
             return response.data if response.data else []
         except Exception as e:
@@ -632,11 +526,8 @@ class DatabaseManager:
             if error_message:
                 update_data["error_message"] = error_message
             
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("ai_analysis_queue").update(update_data).eq("id", queue_id).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("ai_analysis_queue").update(update_data).eq("id", queue_id).execute()
             
             return bool(response.data)
         except Exception as e:
@@ -646,15 +537,12 @@ class DatabaseManager:
     async def get_ai_analysis_summary(self, doctor_firebase_uid: str, patient_id: int = None, visit_id: int = None) -> Dict[str, Any]:
         """Get AI analysis summary using the database function"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.rpc('get_ai_analysis_summary', {
-                    'p_doctor_firebase_uid': doctor_firebase_uid,
-                    'p_patient_id': patient_id,
-                    'p_visit_id': visit_id
-                }).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.rpc('get_ai_analysis_summary', {
+                'p_doctor_firebase_uid': doctor_firebase_uid,
+                'p_patient_id': patient_id,
+                'p_visit_id': visit_id
+            }).execute()
             
             if response.data and len(response.data) > 0:
                 summary = response.data[0]
@@ -687,14 +575,10 @@ class DatabaseManager:
         """Delete all AI analyses for a visit and return count of deleted items"""
         try:
             total_deleted = 0
-            loop = asyncio.get_event_loop();
             
             # Delete AI document analyses for this visit
             try:
-                ai_analyses_response = await loop.run_in_executor(
-                    self.executor, 
-                    lambda: self.supabase.table("ai_document_analysis").delete().eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-                )
+                ai_analyses_response = await self.supabase.table("ai_document_analysis").delete().eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
                 deleted_count = len(ai_analyses_response.data if ai_analyses_response.data else [])
                 total_deleted += deleted_count
                 print(f"Deleted {deleted_count} AI document analyses for visit {visit_id}")
@@ -703,10 +587,7 @@ class DatabaseManager:
             
             # Delete AI consolidated analyses for this visit
             try:
-                consolidated_response = await loop.run_in_executor(
-                    self.executor, 
-                    lambda: self.supabase.table("ai_consolidated_analysis").delete().eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-                )
+                consolidated_response = await self.supabase.table("ai_consolidated_analysis").delete().eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
                 deleted_count = len(consolidated_response.data if consolidated_response.data else [])
                 total_deleted += deleted_count
                 print(f"Deleted {deleted_count} AI consolidated analyses for visit {visit_id}")
@@ -715,10 +596,7 @@ class DatabaseManager:
             
             # Delete AI analysis queue entries for this visit
             try:
-                queue_response = await loop.run_in_executor(
-                    self.executor, 
-                    lambda: self.supabase.table("ai_analysis_queue").delete().eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-                )
+                queue_response = await self.supabase.table("ai_analysis_queue").delete().eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
                 deleted_count = len(queue_response.data if queue_response.data else [])
                 total_deleted += deleted_count
                 print(f"Deleted {deleted_count} AI analysis queue entries for visit {visit_id}")
@@ -730,10 +608,6 @@ class DatabaseManager:
             print(f"Error deleting AI analyses for visit: {e}")
             return 0
 
-    def __del__(self):
-        """Cleanup thread pool executor"""
-        if hasattr(self, 'executor'):
-            self.executor.shutdown(wait=False)
 
     # Report related operations
     async def create_report_upload_link(self, link_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -741,12 +615,8 @@ class DatabaseManager:
         try:
             print(f"Creating report upload link: {link_data}")
             
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("report_upload_links").insert(link_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("report_upload_links").insert(link_data).execute()
             print(f"Supabase insert response: {response}")
             
             if response.data:
@@ -760,12 +630,8 @@ class DatabaseManager:
     async def get_report_upload_link(self, upload_token: str) -> Optional[Dict[str, Any]]:
         """Get report upload link by token"""
         try:
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("report_upload_links").select("*").eq("upload_token", upload_token).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("report_upload_links").select("*").eq("upload_token", upload_token).execute()
             
             if response.data:
                 return response.data[0]
@@ -779,24 +645,21 @@ class DatabaseManager:
         """Create a new report using the security definer function"""
         try:
             # Use the security definer function for report creation
-            response = await asyncio.get_event_loop().run_in_executor(
-                self.executor,
-                lambda: self.supabase.rpc('upload_report_with_token', {
-                    'p_visit_id': report_data['visit_id'],
-                    'p_patient_id': report_data['patient_id'],
-                    'p_doctor_firebase_uid': report_data['doctor_firebase_uid'],
-                    'p_file_name': report_data['file_name'],
-                    'p_file_size': report_data['file_size'],
-                    'p_file_type': report_data['file_type'],
-                    'p_file_url': report_data['file_url'],
-                    'p_storage_path': report_data.get('storage_path'),
-                    'p_test_type': report_data.get('test_type'),
-                    'p_notes': report_data.get('notes'),
-                    'p_upload_token': report_data['upload_token'],
-                    'p_uploaded_at': report_data['uploaded_at'],
-                    'p_created_at': report_data['created_at']
-                }).execute()
-            )
+            response = await self.supabase.rpc('upload_report_with_token', {
+                'p_visit_id': report_data['visit_id'],
+                'p_patient_id': report_data['patient_id'],
+                'p_doctor_firebase_uid': report_data['doctor_firebase_uid'],
+                'p_file_name': report_data['file_name'],
+                'p_file_size': report_data['file_size'],
+                'p_file_type': report_data['file_type'],
+                'p_file_url': report_data['file_url'],
+                'p_storage_path': report_data.get('storage_path'),
+                'p_test_type': report_data.get('test_type'),
+                'p_notes': report_data.get('notes'),
+                'p_upload_token': report_data['upload_token'],
+                'p_uploaded_at': report_data['uploaded_at'],
+                'p_created_at': report_data['created_at']
+            }).execute()
             
             if response.data:
                 print(f"Report created via function: {response.data}")
@@ -815,11 +678,8 @@ class DatabaseManager:
         try:
             print(f"Creating report directly: {report_data}")
             
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("reports").insert(report_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("reports").insert(report_data).execute()
             print(f"Direct report creation response: {response}")
             
             if response.data:
@@ -833,12 +693,8 @@ class DatabaseManager:
     async def get_report_by_id(self, report_id: int, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
         """Get a specific report by ID and doctor"""
         try:
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("reports").select("*").eq("id", report_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("reports").select("*").eq("id", report_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             
             if response.data:
                 return response.data[0]
@@ -851,12 +707,8 @@ class DatabaseManager:
     async def get_reports_by_visit_id(self, visit_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all reports for a visit"""
         try:
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("reports").select("*").eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("uploaded_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("reports").select("*").eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("uploaded_at", desc=True).execute()
             
             reports = response.data if response.data else []
             return [self._safe_report_data(report) for report in reports]
@@ -868,12 +720,8 @@ class DatabaseManager:
     async def get_reports_by_patient_id(self, patient_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all reports for a patient"""
         try:
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("reports").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("uploaded_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("reports").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("uploaded_at", desc=True).execute()
             
             reports = response.data if response.data else []
             return [self._safe_report_data(report) for report in reports]
@@ -888,12 +736,8 @@ class DatabaseManager:
             from datetime import datetime, timezone
             current_time = datetime.now(timezone.utc).isoformat()
             
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("report_upload_links").delete().lt("expires_at", current_time).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("report_upload_links").delete().lt("expires_at", current_time).execute()
             
             return True
         except Exception as e:
@@ -914,12 +758,8 @@ class DatabaseManager:
             # Add updated timestamp
             billing_data["updated_at"] = datetime.now(timezone.utc).isoformat()
             
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visits").update(billing_data).eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("visits").update(billing_data).eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             return bool(response.data)
         except Exception as e:
             print(f"Error updating visit billing: {e}")
@@ -927,70 +767,35 @@ class DatabaseManager:
             return False
 
     async def get_earnings_report(self, doctor_firebase_uid: str, start_date: str = None, end_date: str = None, payment_status: str = None, visit_type: str = None) -> Dict[str, Any]:
-        """Get earnings report for a doctor with filters"""
+        """Get earnings report for a doctor with filters (Optimized via RPC)"""
         try:
-            loop = asyncio.get_event_loop()
+            # Use RPC function for optimized aggregation
+            response = await self.supabase.rpc(
+                "get_doctor_earnings_report",
+                {
+                    "doctor_uid": doctor_firebase_uid,
+                    "start_date_param": start_date,
+                    "end_date_param": end_date,
+                    "payment_status_param": payment_status,
+                    "visit_type_param": visit_type
+                }
+            ).execute()
             
-            # Build query
-            query = self.supabase.table("visits").select("*").eq("doctor_firebase_uid", doctor_firebase_uid)
+            if response.data:
+                return response.data
             
-            # Apply filters
-            if start_date:
-                query = query.gte("visit_date", start_date)
-            if end_date:
-                query = query.lte("visit_date", end_date)
-            if payment_status:
-                query = query.eq("payment_status", payment_status)
-            if visit_type:
-                query = query.eq("visit_type", visit_type)
-            
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: query.execute()
-            )
-            
-            visits = response.data if response.data else []
-            
-            # Calculate statistics
-            total_consultations = len(visits)
-            paid_consultations = len([v for v in visits if v.get("payment_status") == "paid"])
-            unpaid_consultations = len([v for v in visits if v.get("payment_status") in ["unpaid", None]])
-            
-            total_amount = sum(float(v.get("total_amount", 0) or 0) for v in visits)
-            paid_amount = sum(float(v.get("total_amount", 0) or 0) for v in visits if v.get("payment_status") == "paid")
-            unpaid_amount = sum(float(v.get("total_amount", 0) or 0) for v in visits if v.get("payment_status") in ["unpaid", None])
-            
-            average_per_consultation = total_amount / total_consultations if total_consultations > 0 else 0
-            
-            # Breakdown by payment method
-            payment_method_breakdown = {}
-            for visit in visits:
-                if visit.get("payment_status") == "paid" and visit.get("payment_method"):
-                    method = visit.get("payment_method")
-                    amount = float(visit.get("total_amount", 0) or 0)
-                    payment_method_breakdown[method] = payment_method_breakdown.get(method, 0) + amount
-            
-            # Breakdown by visit type
-            visit_type_breakdown = {}
-            for visit in visits:
-                vtype = visit.get("visit_type", "Unknown")
-                amount = float(visit.get("total_amount", 0) or 0)
-                if vtype not in visit_type_breakdown:
-                    visit_type_breakdown[vtype] = {"count": 0, "amount": 0}
-                visit_type_breakdown[vtype]["count"] += 1
-                visit_type_breakdown[vtype]["amount"] += amount
-            
+            # Fallback if RPC returns null (should not happen with COALESCE)
             return {
-                "total_consultations": total_consultations,
-                "paid_consultations": paid_consultations,
-                "unpaid_consultations": unpaid_consultations,
-                "total_amount": round(total_amount, 2),
-                "paid_amount": round(paid_amount, 2),
-                "unpaid_amount": round(unpaid_amount, 2),
-                "average_per_consultation": round(average_per_consultation, 2),
-                "breakdown_by_payment_method": payment_method_breakdown,
-                "breakdown_by_visit_type": visit_type_breakdown,
-                "visits": visits
+                "total_consultations": 0,
+                "paid_consultations": 0,
+                "unpaid_consultations": 0,
+                "total_amount": 0,
+                "paid_amount": 0,
+                "unpaid_amount": 0,
+                "average_per_consultation": 0,
+                "breakdown_by_payment_method": {},
+                "breakdown_by_visit_type": {},
+                "visits": []
             }
             
         except Exception as e:
@@ -1038,11 +843,8 @@ class DatabaseManager:
     async def get_pending_payments(self, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all visits with unpaid status"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visits").select("*, patients(first_name, last_name, phone)").eq("doctor_firebase_uid", doctor_firebase_uid).in_("payment_status", ["unpaid", "partially_paid"]).order("visit_date", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("visits").select("*, patients(first_name, last_name, phone)").eq("doctor_firebase_uid", doctor_firebase_uid).in_("payment_status", ["unpaid", "partially_paid"]).order("visit_date", desc=True).execute()
             return response.data if response.data else []
         except Exception as e:
             print(f"Error fetching pending payments: {e}")
@@ -1054,11 +856,8 @@ class DatabaseManager:
         try:
             print(f"Creating PDF template: {template_data}")
             
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("pdf_templates").insert(template_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("pdf_templates").insert(template_data).execute()
             print(f"PDF template creation response: {response}")
             
             if response.data:
@@ -1072,11 +871,8 @@ class DatabaseManager:
     async def get_pdf_templates_by_doctor(self, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all PDF templates for a doctor"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("pdf_templates").select("*").eq("doctor_firebase_uid", doctor_firebase_uid).order("created_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("pdf_templates").select("*").eq("doctor_firebase_uid", doctor_firebase_uid).order("created_at", desc=True).execute()
             return response.data if response.data else []
         except Exception as e:
             print(f"Error fetching PDF templates: {e}")
@@ -1085,11 +881,8 @@ class DatabaseManager:
     async def get_pdf_template_by_id(self, template_id: int, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
         """Get a specific PDF template by ID"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("pdf_templates").select("*").eq("id", template_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("pdf_templates").select("*").eq("id", template_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             if response.data:
                 return response.data[0]
             return None
@@ -1100,11 +893,8 @@ class DatabaseManager:
     async def update_pdf_template(self, template_id: int, doctor_firebase_uid: str, update_data: Dict[str, Any]) -> bool:
         """Update PDF template information"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("pdf_templates").update(update_data).eq("id", template_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("pdf_templates").update(update_data).eq("id", template_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             return bool(response.data)
         except Exception as e:
             print(f"Error updating PDF template: {e}")
@@ -1113,11 +903,8 @@ class DatabaseManager:
     async def delete_pdf_template(self, template_id: int, doctor_firebase_uid: str) -> bool:
         """Delete a PDF template"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("pdf_templates").delete().eq("id", template_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("pdf_templates").delete().eq("id", template_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             return bool(response.data)
         except Exception as e:
             print(f"Error deleting PDF template: {e}")
@@ -1129,11 +916,8 @@ class DatabaseManager:
         try:
             print(f"Creating visit report: {report_data}")
             
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visit_reports").insert(report_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("visit_reports").insert(report_data).execute()
             print(f"Visit report creation response: {response}")
             
             if response.data:
@@ -1177,11 +961,8 @@ class DatabaseManager:
     async def get_visit_reports_by_visit_id(self, visit_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all visit reports for a specific visit"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visit_reports").select("*").eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("generated_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("visit_reports").select("*").eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("generated_at", desc=True).execute()
             reports = response.data if response.data else []
             return [self._safe_report_data(report) for report in reports]
         except Exception as e:
@@ -1191,11 +972,8 @@ class DatabaseManager:
     async def get_visit_reports_by_patient_id(self, patient_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all visit reports for a specific patient"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visit_reports").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("generated_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("visit_reports").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("generated_at", desc=True).execute()
             reports = response.data if response.data else []
             return [self._safe_report_data(report) for report in reports]
         except Exception as e:
@@ -1205,11 +983,8 @@ class DatabaseManager:
     async def get_visit_report_by_id(self, report_id: int, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
         """Get a specific visit report by ID"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visit_reports").select("*").eq("id", report_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("visit_reports").select("*").eq("id", report_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             if response.data:
                 return response.data[0]
             return None
@@ -1220,11 +995,8 @@ class DatabaseManager:
     async def update_visit_report(self, report_id: int, update_data: Dict[str, Any]) -> bool:
         """Update visit report information"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visit_reports").update(update_data).eq("id", report_id).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("visit_reports").update(update_data).eq("id", report_id).execute()
             return bool(response.data)
         except Exception as e:
             print(f"Error updating visit report: {e}")
@@ -1233,11 +1005,8 @@ class DatabaseManager:
     async def delete_visit_report(self, report_id: int, doctor_firebase_uid: str) -> bool:
         """Delete a visit report"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("visit_reports").delete().eq("id", report_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("visit_reports").delete().eq("id", report_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             return bool(response.data)
         except Exception as e:
             print(f"Error deleting visit report: {e}")
@@ -1252,11 +1021,8 @@ class DatabaseManager:
             print(f"   Doctor UID: {analysis_data.get('doctor_firebase_uid')}")
             print(f"   Raw analysis length: {len(analysis_data.get('raw_analysis', ''))}")
             
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("patient_history_analysis").insert(analysis_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("patient_history_analysis").insert(analysis_data).execute()
             
             print(f"📦 Supabase response: data={bool(response.data)}, count={getattr(response, 'count', None)}")
             
@@ -1274,11 +1040,8 @@ class DatabaseManager:
     async def get_latest_patient_history_analysis(self, patient_id: int, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
         """Get the latest comprehensive history analysis for a patient"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("patient_history_analysis").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("analyzed_at", desc=True).limit(1).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("patient_history_analysis").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("analyzed_at", desc=True).limit(1).execute()
             if response.data:
                 return response.data[0]
             return None
@@ -1289,11 +1052,8 @@ class DatabaseManager:
     async def get_patient_history_analyses(self, patient_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all comprehensive history analyses for a patient"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("patient_history_analysis").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("analyzed_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("patient_history_analysis").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("analyzed_at", desc=True).execute()
             return response.data if response.data else []
         except Exception as e:
             print(f"Error fetching patient history analyses: {e}")
@@ -1317,11 +1077,8 @@ class DatabaseManager:
     async def delete_patient_history_analysis(self, analysis_id: int, doctor_firebase_uid: str) -> bool:
         """Delete a patient history analysis record"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("patient_history_analysis").delete().eq("id", analysis_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("patient_history_analysis").delete().eq("id", analysis_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             if response.data:
                 print(f"Successfully deleted patient history analysis {analysis_id}")
                 return True
@@ -1336,11 +1093,8 @@ class DatabaseManager:
     async def delete_patient_history_analyses_by_patient(self, patient_id: int, doctor_firebase_uid: str) -> bool:
         """Delete all patient history analyses for a specific patient"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("patient_history_analysis").delete().eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("patient_history_analysis").delete().eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             deleted_count = len(response.data) if response.data else 0
             print(f"Successfully deleted {deleted_count} patient history analyses for patient {patient_id}")
             return True
@@ -1393,49 +1147,27 @@ class DatabaseManager:
         """
         Clean up all outdated patient history analyses for a doctor.
         This can be run periodically to ensure data consistency.
+        (Optimized via RPC)
         """
         try:
             print(f"Starting cleanup of all outdated patient history analyses for doctor {doctor_firebase_uid}")
             
-            # Get all patients for this doctor
-            patients = await self.get_all_patients_for_doctor(doctor_firebase_uid)
+            # Use RPC function for optimized cleanup
+            response = await self.supabase.rpc(
+                "delete_outdated_patient_history_analyses",
+                {"doctor_uid": doctor_firebase_uid}
+            ).execute()
             
-            total_cleaned = 0
-            for patient in patients:
-                patient_id = patient["id"]
-                patient_name = f"{patient['first_name']} {patient['last_name']}"
-                
-                print(f"Checking patient {patient_id} ({patient_name})...")
-                
-                # Get current visit and report counts
-                visits = await self.get_visits_by_patient_id(patient_id, doctor_firebase_uid)
-                reports = await self.get_reports_by_patient_id(patient_id, doctor_firebase_uid)
-                
-                current_visit_count = len(visits) if visits else 0
-                current_report_count = len(reports) if reports else 0
-                
-                # Get all existing analyses for this patient
-                analyses = await self.get_patient_history_analyses(patient_id, doctor_firebase_uid)
-                
-                patient_outdated = 0
-                for analysis in analyses:
-                    stored_visit_count = analysis.get("total_visits", 0)
-                    stored_report_count = analysis.get("total_reports", 0)
-                    
-                    # Check if the analysis is outdated
-                    if (stored_visit_count != current_visit_count or 
-                        stored_report_count != current_report_count):
-                        print(f"  Deleting outdated analysis {analysis['id']}: visits {stored_visit_count}->{current_visit_count}, reports {stored_report_count}->{current_report_count}")
-                        await self.delete_patient_history_analysis(analysis["id"], doctor_firebase_uid)
-                        patient_outdated += 1
-                        total_cleaned += 1
-                
-                if patient_outdated > 0:
-                    print(f"  Cleaned up {patient_outdated} outdated analyses for patient {patient_name}")
-                else:
-                    print(f"  No outdated analyses found for patient {patient_name}")
+            deleted_items = response.data if response.data else []
+            total_cleaned = len(deleted_items)
             
-            print(f"Cleanup completed. Total outdated analyses cleaned: {total_cleaned}")
+            if total_cleaned > 0:
+                print(f"Cleanup completed. Total outdated analyses cleaned: {total_cleaned}")
+                for item in deleted_items:
+                    print(f"  Deleted analysis {item.get('analysis_id')} for patient {item.get('patient_id')}: {item.get('reason')}")
+            else:
+                print("No outdated analyses found.")
+                
             return True
             
         except Exception as e:
@@ -1449,11 +1181,8 @@ class DatabaseManager:
         try:
             print(f"Creating handwritten visit note: {note_data}")
             
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("handwritten_visit_notes").insert(note_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("handwritten_visit_notes").insert(note_data).execute()
             print(f"Handwritten visit note creation response: {response}")
             
             if response.data:
@@ -1467,11 +1196,8 @@ class DatabaseManager:
     async def get_handwritten_visit_note_by_id(self, note_id: int, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
         """Get a handwritten visit note by ID"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("handwritten_visit_notes").select("*").eq("id", note_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("handwritten_visit_notes").select("*").eq("id", note_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             return response.data[0] if response.data else None
         except Exception as e:
             print(f"Error getting handwritten visit note by ID: {e}")
@@ -1480,11 +1206,8 @@ class DatabaseManager:
     async def get_handwritten_visit_notes_by_visit_id(self, visit_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all handwritten visit notes for a specific visit"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("handwritten_visit_notes").select("*").eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).eq("is_active", True).order("created_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("handwritten_visit_notes").select("*").eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).eq("is_active", True).order("created_at", desc=True).execute()
             return response.data if response.data else []
         except Exception as e:
             print(f"Error getting handwritten visit notes by visit ID: {e}")
@@ -1493,11 +1216,8 @@ class DatabaseManager:
     async def get_handwritten_visit_notes_by_patient_id(self, patient_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all handwritten visit notes for a specific patient"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("handwritten_visit_notes").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).eq("is_active", True).order("created_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("handwritten_visit_notes").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).eq("is_active", True).order("created_at", desc=True).execute()
             return response.data if response.data else []
         except Exception as e:
             print(f"Error getting handwritten visit notes by patient ID: {e}")
@@ -1506,11 +1226,8 @@ class DatabaseManager:
     async def update_handwritten_visit_note(self, note_id: int, doctor_firebase_uid: str, update_data: Dict[str, Any]) -> bool:
         """Update handwritten visit note information"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("handwritten_visit_notes").update(update_data).eq("id", note_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("handwritten_visit_notes").update(update_data).eq("id", note_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             return bool(response.data)
         except Exception as e:
             print(f"Error updating handwritten visit note: {e}")
@@ -1519,11 +1236,8 @@ class DatabaseManager:
     async def delete_handwritten_visit_note(self, note_id: int, doctor_firebase_uid: str) -> bool:
         """Delete a handwritten visit note"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("handwritten_visit_notes").delete().eq("id", note_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("handwritten_visit_notes").delete().eq("id", note_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             return bool(response.data)
         except Exception as e:
             print(f"Error deleting handwritten visit note: {e}")
@@ -1532,11 +1246,8 @@ class DatabaseManager:
     async def get_handwritten_visit_notes_by_doctor(self, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all handwritten visit notes for a doctor"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("handwritten_visit_notes").select("*").eq("doctor_firebase_uid", doctor_firebase_uid).eq("is_active", True).order("created_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("handwritten_visit_notes").select("*").eq("doctor_firebase_uid", doctor_firebase_uid).eq("is_active", True).order("created_at", desc=True).execute()
             return response.data if response.data else []
         except Exception as e:
             print(f"Error getting handwritten visit notes by doctor: {e}")
@@ -1557,11 +1268,8 @@ class DatabaseManager:
             start_date_str = start_date.strftime('%Y-%m-%d')
             end_date_str = end_date.strftime('%Y-%m-%d')
             
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("visits")
-                .select("""
+            # Async Supabase call
+            response = await self.supabase.table("visits").select("""
                     id,
                     visit_id:id,
                     patient_id,
@@ -1576,14 +1284,7 @@ class DatabaseManager:
                         last_name,
                         phone
                     )
-                """)
-                .eq("doctor_firebase_uid", doctor_firebase_uid)
-                .gte("follow_up_date", start_date_str)
-                .lt("follow_up_date", end_date_str)
-                .not_.is_("follow_up_date", "null")
-                .order("follow_up_date", desc=False)
-                .execute()
-            )
+                """).eq("doctor_firebase_uid", doctor_firebase_uid).gte("follow_up_date", start_date_str).lt("follow_up_date", end_date_str).not_.is_("follow_up_date", "null").order("follow_up_date", desc=False).execute()
             
             # Process the results to flatten the patient data
             appointments = []
@@ -1616,11 +1317,8 @@ class DatabaseManager:
         try:
             print(f"Querying follow-up appointments for doctor {doctor_firebase_uid} on date {date}")
             
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("visits")
-                .select("""
+            # Async Supabase call
+            response = await self.supabase.table("visits").select("""
                     id,
                     patient_id,
                     visit_date,
@@ -1634,13 +1332,7 @@ class DatabaseManager:
                         last_name,
                         phone
                     )
-                """)
-                .eq("doctor_firebase_uid", doctor_firebase_uid)
-                .eq("follow_up_date", date)
-                .not_.is_("follow_up_date", "null")
-                .order("follow_up_time", desc=False)
-                .execute()
-            )
+                """).eq("doctor_firebase_uid", doctor_firebase_uid).eq("follow_up_date", date).not_.is_("follow_up_date", "null").order("follow_up_time", desc=False).execute()
             
             print(f"Database response: {response.data}")
             
@@ -1689,11 +1381,8 @@ class DatabaseManager:
             today_str = today.strftime('%Y-%m-%d')
             end_date_str = end_date.strftime('%Y-%m-%d')
             
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("visits")
-                .select("""
+            # Async Supabase call
+            response = await self.supabase.table("visits").select("""
                     id,
                     visit_id:id,
                     patient_id,
@@ -1708,15 +1397,7 @@ class DatabaseManager:
                         last_name,
                         phone
                     )
-                """)
-                .eq("doctor_firebase_uid", doctor_firebase_uid)
-                .gte("follow_up_date", today_str)
-                .lte("follow_up_date", end_date_str)
-                .not_.is_("follow_up_date", "null")
-                .order("follow_up_date", desc=False)
-                .order("follow_up_time", desc=False)
-                .execute()
-            )
+                """).eq("doctor_firebase_uid", doctor_firebase_uid).gte("follow_up_date", today_str).lte("follow_up_date", end_date_str).not_.is_("follow_up_date", "null").order("follow_up_date", desc=False).order("follow_up_time", desc=False).execute()
             
             # Process the results
             appointments = []
@@ -1750,11 +1431,8 @@ class DatabaseManager:
             from datetime import date
             today = date.today().strftime('%Y-%m-%d')
             
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("visits")
-                .select("""
+            # Async Supabase call
+            response = await self.supabase.table("visits").select("""
                     id,
                     visit_id:id,
                     patient_id,
@@ -1769,13 +1447,7 @@ class DatabaseManager:
                         last_name,
                         phone
                     )
-                """)
-                .eq("doctor_firebase_uid", doctor_firebase_uid)
-                .lt("follow_up_date", today)
-                .not_.is_("follow_up_date", "null")
-                .order("follow_up_date", desc=False)
-                .execute()
-            )
+                """).eq("doctor_firebase_uid", doctor_firebase_uid).lt("follow_up_date", today).not_.is_("follow_up_date", "null").order("follow_up_date", desc=False).execute()
             
             # Process the results
             appointments = []
@@ -1871,11 +1543,8 @@ class DatabaseManager:
     async def create_notification(self, notification_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Create a new notification for a doctor"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("notifications").insert(notification_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("notifications").insert(notification_data).execute()
             
             if response.data:
                 print(f"Notification created: {response.data[0]['id']}")
@@ -1888,17 +1557,13 @@ class DatabaseManager:
     async def get_doctor_notifications(self, doctor_firebase_uid: str, unread_only: bool = False, limit: int = 50) -> List[Dict[str, Any]]:
         """Get notifications for a doctor"""
         try:
-            loop = asyncio.get_event_loop()
-            
             query = self.supabase.table("notifications").select("*").eq("doctor_firebase_uid", doctor_firebase_uid)
             
             if unread_only:
                 query = query.eq("is_read", False)
             
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: query.order("created_at", desc=True).limit(limit).execute()
-            )
+            # Async Supabase call
+            response = await query.order("created_at", desc=True).limit(limit).execute()
             
             return response.data if response.data else []
         except Exception as e:
@@ -1908,15 +1573,8 @@ class DatabaseManager:
     async def mark_notification_as_read(self, notification_id: int, doctor_firebase_uid: str) -> bool:
         """Mark a notification as read"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("notifications")
-                .update({"is_read": True, "read_at": datetime.now(timezone.utc).isoformat()})
-                .eq("id", notification_id)
-                .eq("doctor_firebase_uid", doctor_firebase_uid)
-                .execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("notifications").update({"is_read": True, "read_at": datetime.now(timezone.utc).isoformat()}).eq("id", notification_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             
             return bool(response.data)
         except Exception as e:
@@ -1926,15 +1584,8 @@ class DatabaseManager:
     async def mark_all_notifications_as_read(self, doctor_firebase_uid: str) -> bool:
         """Mark all notifications for a doctor as read"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("notifications")
-                .update({"is_read": True, "read_at": datetime.now(timezone.utc).isoformat()})
-                .eq("doctor_firebase_uid", doctor_firebase_uid)
-                .eq("is_read", False)
-                .execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("notifications").update({"is_read": True, "read_at": datetime.now(timezone.utc).isoformat()}).eq("doctor_firebase_uid", doctor_firebase_uid).eq("is_read", False).execute()
             
             return bool(response.data)
         except Exception as e:
@@ -1944,15 +1595,8 @@ class DatabaseManager:
     async def get_unread_notification_count(self, doctor_firebase_uid: str) -> int:
         """Get count of unread notifications for a doctor"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("notifications")
-                .select("id", count="exact")
-                .eq("doctor_firebase_uid", doctor_firebase_uid)
-                .eq("is_read", False)
-                .execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("notifications").select("id", count="exact").eq("doctor_firebase_uid", doctor_firebase_uid).eq("is_read", False).execute()
             
             return response.count if response.count is not None else 0
         except Exception as e:
@@ -1962,15 +1606,8 @@ class DatabaseManager:
     async def delete_notification(self, notification_id: int, doctor_firebase_uid: str) -> bool:
         """Delete a notification"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("notifications")
-                .delete()
-                .eq("id", notification_id)
-                .eq("doctor_firebase_uid", doctor_firebase_uid)
-                .execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("notifications").delete().eq("id", notification_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             
             return bool(response.data)
         except Exception as e:
@@ -1981,11 +1618,8 @@ class DatabaseManager:
     async def create_lab_contact(self, lab_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Create a new lab contact"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("lab_contacts").insert(lab_data).execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("lab_contacts").insert(lab_data).execute()
             
             if response.data:
                 print(f"Lab contact created: {response.data[0]['id']}")
@@ -1998,8 +1632,6 @@ class DatabaseManager:
     async def get_doctor_lab_contacts(self, doctor_firebase_uid: str, lab_type: Optional[str] = None, active_only: bool = True) -> List[Dict[str, Any]]:
         """Get lab contacts for a doctor"""
         try:
-            loop = asyncio.get_event_loop()
-            
             query = self.supabase.table("lab_contacts").select("*").eq("doctor_firebase_uid", doctor_firebase_uid)
             
             if lab_type:
@@ -2008,10 +1640,8 @@ class DatabaseManager:
             if active_only:
                 query = query.eq("is_active", True)
             
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: query.order("created_at", desc=True).execute()
-            )
+            # Async Supabase call
+            response = await query.order("created_at", desc=True).execute()
             
             return response.data if response.data else []
         except Exception as e:
@@ -2021,15 +1651,8 @@ class DatabaseManager:
     async def update_lab_contact(self, contact_id: int, doctor_firebase_uid: str, update_data: Dict[str, Any]) -> bool:
         """Update a lab contact"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("lab_contacts")
-                .update(update_data)
-                .eq("id", contact_id)
-                .eq("doctor_firebase_uid", doctor_firebase_uid)
-                .execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("lab_contacts").update(update_data).eq("id", contact_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             
             return bool(response.data)
         except Exception as e:
@@ -2039,15 +1662,8 @@ class DatabaseManager:
     async def delete_lab_contact(self, contact_id: int, doctor_firebase_uid: str) -> bool:
         """Delete a lab contact"""
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("lab_contacts")
-                .delete()
-                .eq("id", contact_id)
-                .eq("doctor_firebase_uid", doctor_firebase_uid)
-                .execute()
-            )
+            # Async Supabase call
+            response = await self.supabase.table("lab_contacts").delete().eq("id", contact_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             
             return bool(response.data)
         except Exception as e:
@@ -2057,29 +1673,16 @@ class DatabaseManager:
     async def get_lab_contact_by_phone(self, phone: str) -> Optional[Dict[str, Any]]:
         """Get lab contact by phone number (checks both profile contacts and lab_contacts table)"""
         try:
-            loop = asyncio.get_event_loop()
             print(f"Looking for lab contact with phone: '{phone}'")
             
             # First check if this phone number exists in doctor profiles
             # Since .or_() is not available in all Supabase client versions, use separate queries
             
             # Check pathology lab phone
-            pathology_response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("doctors")
-                .select("firebase_uid, first_name, last_name, pathology_lab_name, pathology_lab_phone, radiology_lab_name, radiology_lab_phone")
-                .eq("pathology_lab_phone", phone)
-                .execute()
-            )
+            pathology_response = await self.supabase.table("doctors").select("firebase_uid, first_name, last_name, pathology_lab_name, pathology_lab_phone, radiology_lab_name, radiology_lab_phone").eq("pathology_lab_phone", phone).execute()
             
             # Check radiology lab phone
-            radiology_response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("doctors")
-                .select("firebase_uid, first_name, last_name, pathology_lab_name, pathology_lab_phone, radiology_lab_name, radiology_lab_phone")
-                .eq("radiology_lab_phone", phone)
-                .execute()
-            )
+            radiology_response = await self.supabase.table("doctors").select("firebase_uid, first_name, last_name, pathology_lab_name, pathology_lab_phone, radiology_lab_name, radiology_lab_phone").eq("radiology_lab_phone", phone).execute()
             
             # Combine results
             doctor_data = []
@@ -2138,14 +1741,7 @@ class DatabaseManager:
             
             # If not found in doctor profiles, check lab_contacts table (legacy support)
             print(f"Doctor profile lookup returned no results, checking lab_contacts table...")
-            response = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("lab_contacts")
-                .select("*")
-                .eq("contact_phone", phone)
-                .eq("is_active", True)
-                .execute()
-            )
+            response = await self.supabase.table("lab_contacts").select("*").eq("contact_phone", phone).eq("is_active", True).execute()
             
             print(f"Lab contacts lookup response: {response.data if response else 'None'}")
             

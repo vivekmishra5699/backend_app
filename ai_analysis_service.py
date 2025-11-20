@@ -79,6 +79,14 @@ class AIAnalysisService:
             # Perform AI analysis
             analysis_result = await self._perform_gemini_analysis(prompt, document_data)
             
+            # Check if analysis failed (e.g. rate limit)
+            if "error" in analysis_result:
+                return {
+                    "success": False,
+                    "error": analysis_result["error"],
+                    "analysis": None
+                }
+            
             return {
                 "success": True,
                 "analysis": analysis_result,

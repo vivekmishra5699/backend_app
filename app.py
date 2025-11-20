@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, ValidationError, Field
 from datetime import datetime, timezone, timedelta, timedelta
 from typing import Optional, List, Dict, Any
-from supabase import create_client, Client
+from supabase import create_client, Client, AsyncClient
 from dotenv import load_dotenv
 import firebase_admin
 from firebase_admin import credentials, auth
@@ -28,7 +28,7 @@ from datetime import timedelta
 import httpx
 import uvicorn
 from async_file_downloader import file_downloader
-from connection_pool import get_supabase_client, close_connection_pools
+from connection_pool import get_supabase_client, get_async_supabase_client, close_connection_pools
 from thread_pool_manager import shutdown_thread_pool
 from optimized_cache import optimized_cache
 import firebase_admin
@@ -51,13 +51,73 @@ from ai_analysis_processor import AIAnalysisProcessor
 load_dotenv()
 
 # Global variables for services
-ai_processor = None
+supabase: Optional[AsyncClient] = None
+db: Optional[DatabaseManager] = None
+firebase_manager: Optional[AsyncFirebaseManager] = None
+whatsapp_service: Optional[WhatsAppService] = None
+ai_analysis_service: Optional[AIAnalysisService] = None
+ai_processor: Optional[AIAnalysisProcessor] = None
 background_task = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    global ai_processor, background_task
+    global supabase, db, firebase_manager, whatsapp_service, ai_analysis_service, ai_processor, background_task
+    
+    print("🚀 Starting application...")
+    
+    # Supabase setup with error handling
+    try:
+        SUPABASE_URL = os.getenv("SUPABASE_URL")
+        SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+        SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        
+        print(f"Supabase URL: {SUPABASE_URL}")
+        print(f"Supabase Key present: {'Yes' if SUPABASE_KEY else 'No'}")
+        print(f"Supabase Service Role Key present: {'Yes' if SUPABASE_SERVICE_ROLE_KEY else 'No'}")
+        
+        if not SUPABASE_URL or not SUPABASE_KEY:
+            raise ValueError("Supabase credentials not found in environment variables")
+        
+        if not SUPABASE_SERVICE_ROLE_KEY:
+            raise ValueError("Service role key is required for RLS-enabled operations")
+        
+        # Use service role client with connection pooling for database operations
+        # Initialize async Supabase client
+        supabase = await get_async_supabase_client(
+            supabase_url=SUPABASE_URL,
+            supabase_key=SUPABASE_SERVICE_ROLE_KEY,
+            pool_size=10,  # Maintain 10 active connections
+            max_overflow=20,  # Allow up to 20 overflow connections
+            pool_timeout=30,  # Connection timeout
+            pool_recycle=3600  # Recycle connections after 1 hour
+        )
+        print("✅ Supabase initialized with connection pooling (Async)")
+        
+        # Initialize database manager with service role client
+        db = DatabaseManager(supabase)
+        print("Database manager initialized successfully")
+        
+        # Initialize async Firebase manager  
+        firebase_manager = AsyncFirebaseManager()
+        print("Firebase manager initialized successfully")
+        
+        # Initialize WhatsApp service
+        whatsapp_service = WhatsAppService()
+        print("WhatsApp service initialized successfully")
+        
+        # Initialize AI Analysis service
+        ai_analysis_service = AIAnalysisService()
+        print("AI Analysis service initialized successfully")
+        
+        # Initialize AI Analysis background processor (using global variable)
+        ai_processor = AIAnalysisProcessor(db, ai_analysis_service)
+        print("AI Analysis processor initialized successfully")
+        
+    except Exception as e:
+        print(f"ERROR initializing Supabase: {e}")
+        raise
+
     print("🚀 Starting AI Analysis background processor...")
     
     try:
@@ -126,57 +186,6 @@ try:
         print("Firebase app already initialized")
 except Exception as e:
     print(f"ERROR initializing Firebase: {e}")
-    raise
-
-# Supabase setup with error handling
-try:
-    SUPABASE_URL = os.getenv("SUPABASE_URL")
-    SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-    SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-    
-    print(f"Supabase URL: {SUPABASE_URL}")
-    print(f"Supabase Key present: {'Yes' if SUPABASE_KEY else 'No'}")
-    print(f"Supabase Service Role Key present: {'Yes' if SUPABASE_SERVICE_ROLE_KEY else 'No'}")
-    
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise ValueError("Supabase credentials not found in environment variables")
-    
-    if not SUPABASE_SERVICE_ROLE_KEY:
-        raise ValueError("Service role key is required for RLS-enabled operations")
-    
-    # Use service role client with connection pooling for database operations
-    supabase: Client = get_supabase_client(
-        supabase_url=SUPABASE_URL,
-        supabase_key=SUPABASE_SERVICE_ROLE_KEY,
-        pool_size=10,  # Maintain 10 active connections
-        max_overflow=20,  # Allow up to 20 overflow connections
-        pool_timeout=30,  # Connection timeout
-        pool_recycle=3600  # Recycle connections after 1 hour
-    )
-    print("✅ Supabase initialized with connection pooling")
-    
-    # Initialize database manager with service role client
-    db = DatabaseManager(supabase)
-    print("Database manager initialized successfully")
-    
-    # Initialize async Firebase manager  
-    firebase_manager = AsyncFirebaseManager()
-    print("Firebase manager initialized successfully")
-    
-    # Initialize WhatsApp service
-    whatsapp_service = WhatsAppService()
-    print("WhatsApp service initialized successfully")
-    
-    # Initialize AI Analysis service
-    ai_analysis_service = AIAnalysisService()
-    print("AI Analysis service initialized successfully")
-    
-    # Initialize AI Analysis background processor (using global variable)
-    ai_processor = AIAnalysisProcessor(db, ai_analysis_service)
-    print("AI Analysis processor initialized successfully")
-    
-except Exception as e:
-    print(f"ERROR initializing Supabase: {e}")
     raise
 
 security = HTTPBearer()

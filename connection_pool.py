@@ -4,7 +4,7 @@ Implements connection pooling to reduce latency and improve performance
 """
 import httpx
 from typing import Optional
-from supabase import create_client, Client
+from supabase import create_client, Client, create_async_client, AsyncClient
 import os
 
 
@@ -17,6 +17,7 @@ class ConnectionPoolManager:
     _instance = None
     _http_client: Optional[httpx.AsyncClient] = None
     _supabase_client: Optional[Client] = None
+    _async_supabase_client: Optional[AsyncClient] = None
     
     def __new__(cls):
         """Singleton pattern to ensure only one connection pool"""
@@ -140,6 +141,32 @@ class ConnectionPoolManager:
         
         return self._supabase_client
     
+    async def get_async_supabase_client(
+        self,
+        supabase_url: str,
+        supabase_key: str,
+        pool_size: int = 10,
+        max_overflow: int = 20,
+        pool_timeout: int = 30,
+        pool_recycle: int = 3600
+    ) -> AsyncClient:
+        """
+        Get or create an Async Supabase client.
+        """
+        if self._async_supabase_client is None:
+            try:
+                self._async_supabase_client = await create_async_client(
+                    supabase_url,
+                    supabase_key
+                )
+            except Exception as e:
+                print(f"❌ Error creating Async Supabase client: {e}")
+                raise
+            
+            print(f"✅ Async Supabase Client configured")
+        
+        return self._async_supabase_client
+    
     async def close_all(self):
         """Close all connection pools gracefully"""
         print("🔌 Closing all connection pools...")
@@ -195,3 +222,19 @@ def get_supabase_client(
 async def close_connection_pools():
     """Close all connection pools - call this on application shutdown"""
     await connection_pool.close_all()
+
+
+async def get_async_supabase_client(
+    supabase_url: Optional[str] = None,
+    supabase_key: Optional[str] = None,
+    **kwargs
+) -> AsyncClient:
+    """Get the shared Async Supabase client"""
+    # Use environment variables if not provided
+    url = supabase_url or os.getenv("SUPABASE_URL")
+    key = supabase_key or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    
+    if not url or not key:
+        raise ValueError("Supabase URL and key must be provided or set in environment")
+    
+    return await connection_pool.get_async_supabase_client(url, key, **kwargs)

@@ -66,19 +66,20 @@ class AIAnalysisProcessor:
             
             print(f"📋 Found {len(queue_items)} pending AI analyses to process")
             
-            # Process analyses sequentially with delay to avoid rate limits
-            for i, queue_item in enumerate(queue_items):
-                try:
-                    await self.process_single_analysis(queue_item)
-                    
-                    # Add delay between analyses (except for the last one)
-                    if i < len(queue_items) - 1:
-                        print(f"⏳ Waiting {self.delay_between_analyses}s before next analysis...")
-                        await asyncio.sleep(self.delay_between_analyses)
-                except Exception as e:
-                    print(f"❌ Error processing queue item {queue_item.get('id')}: {e}")
-                    # Continue with next item even if this one fails
-                    continue
+            # Process analyses concurrently using asyncio.gather
+            print(f"🚀 Processing {len(queue_items)} analyses concurrently...")
+            tasks = [self.process_single_analysis(item) for item in queue_items]
+            
+            # Use return_exceptions=True to ensure all tasks complete even if one fails
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Check for any exceptions returned by gather
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    item_id = queue_items[i].get('id', 'unknown')
+                    print(f"❌ Exception in concurrent task for item {item_id}: {result}")
+            
+            print(f"✅ Batch processing completed")
                 
         except Exception as e:
             print(f"❌ Error processing pending analyses: {e}")
@@ -89,16 +90,13 @@ class AIAnalysisProcessor:
         try:
             # Use a direct query to get pending analyses
             # This is a simplified version - in production you might want to batch by doctor
-            response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.db.supabase.table("ai_analysis_queue")
-                    .select("*")
-                    .eq("status", "pending")
-                    .order("priority", desc=True)
-                    .order("queued_at")
-                    .limit(limit)
+            response = await self.db.supabase.table("ai_analysis_queue") \
+                    .select("*") \
+                    .eq("status", "pending") \
+                    .order("priority", desc=True) \
+                    .order("queued_at") \
+                    .limit(limit) \
                     .execute()
-            )
             
             return response.data if response.data else []
             
@@ -257,12 +255,9 @@ class AIAnalysisProcessor:
         """Get statistics about the processing queue"""
         try:
             # Get queue statistics
-            response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.db.supabase.table("ai_analysis_queue")
-                    .select("status")
+            response = await self.db.supabase.table("ai_analysis_queue") \
+                    .select("status") \
                     .execute()
-            )
             
             queue_items = response.data if response.data else []
             
@@ -294,7 +289,7 @@ async def run_background_processor():
         # Initialize services
         from database import DatabaseManager
         from ai_analysis_service import AIAnalysisService
-        from supabase import create_client
+        from supabase import create_async_client
         
         # Setup Supabase client
         supabase_url = os.getenv("SUPABASE_URL")
@@ -304,7 +299,7 @@ async def run_background_processor():
             print("❌ Missing Supabase credentials")
             return
         
-        supabase = create_client(supabase_url, supabase_key)
+        supabase = await create_async_client(supabase_url, supabase_key)
         db = DatabaseManager(supabase)
         ai_service = AIAnalysisService()
         
