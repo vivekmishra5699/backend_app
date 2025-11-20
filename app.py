@@ -9947,85 +9947,8 @@ async def get_lab_dashboard(
             detail="Failed to get lab dashboard"
         )
 
-# Debug endpoint for testing file uploads
-@app.post("/debug-upload")
-async def debug_upload(request: Request):
-    """Debug file upload issues"""
-    try:
-        form = await request.form()
-        
-        debug_info = {
-            "form_keys": list(form.keys()),
-            "form_items": {}
-        }
-        
-        for key, value in form.items():
-            if hasattr(value, 'filename'):
-                debug_info["form_items"][key] = {
-                    "type": str(type(value)),
-                    "filename": getattr(value, 'filename', None),
-                    "content_type": getattr(value, 'content_type', None),
-                    "size": len(await value.read()) if hasattr(value, 'read') else 'unknown'
-                }
-                # Reset file position after reading
-                if hasattr(value, 'seek'):
-                    await value.seek(0)
-            else:
-                debug_info["form_items"][key] = {
-                    "type": str(type(value)),
-                    "value": str(value)
-                }
-        
-        return debug_info
-    except Exception as e:
-        return {"error": str(e)}
-
-# Alternative lab upload endpoint using FastAPI File parameter
-@app.post("/api/lab-upload-reports-alt", response_model=dict)
-async def lab_upload_reports_alternative(
-    request_token: str = Form(...),
-    notes: str = Form(""),
-    files: List[UploadFile] = File(...)
-):
-    """Alternative lab report upload using FastAPI File parameter"""
-    try:
-        print(f"Alt upload - Token: {request_token}, Files: {len(files)}")
-        
-        # Get and validate request
-        request_data = await db.get_lab_report_request_by_token(request_token)
-        if not request_data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Invalid request token"
-            )
-        
-        uploaded_files = []
-        
-        for file in files:
-            print(f"Processing file: {file.filename}")
-            file_content = await file.read()
-            file_size = len(file_content)
-            print(f"File size: {file_size} bytes")
-            
-            if file_size > 0:
-                # Simple success for now
-                uploaded_files.append({
-                    "file_name": file.filename,
-                    "file_size": file_size
-                })
-        
-        return {
-            "message": f"Successfully uploaded {len(uploaded_files)} file(s) via alternative endpoint",
-            "uploaded_files": uploaded_files,
-            "upload_count": len(uploaded_files)
-        }
-        
-    except Exception as e:
-        print(f"Alt upload error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
+# Debug upload and alternative lab-upload endpoints removed.
+# Use `/api/lab-upload-reports` for lab uploads and the lab dashboard endpoints for lab workflows.
 
 @app.post("/api/lab-upload-reports", response_model=dict)
 async def lab_upload_reports(

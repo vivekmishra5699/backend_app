@@ -92,52 +92,106 @@ class DatabaseManager:
             return None
 
     async def update_doctor(self, firebase_uid: str, update_data: Dict[str, Any]) -> bool:
-        """Update doctor profile"""
+        """Update doctor profile and sync lab contacts"""
         try:
-            # Run the synchronous Supabase call in a thread pool
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self.executor, 
-                lambda: self.supabase.table("doctors").update(update_data).eq("firebase_uid", firebase_uid).execute()
-            )
+            # Update the main doctor profile
+            response = await self.supabase.table("doctors").update(update_data).eq("firebase_uid", firebase_uid).execute()
             
-            # Invalidate cache after successful update
-            if response.data and self.cache:
-                cache_key = f"doctor_uid:{firebase_uid}"
-                await self.cache.delete(cache_key)
-                print(f"Cache invalidated for doctor: {firebase_uid}")
+            if not response.data:
+                print(f"Warning: No doctor found with firebase_uid {firebase_uid} to update.")
+                return False
+
+            # Invalidate cache for the updated doctor
+            if self.cache:
+                await self.cache.delete(f"doctor_uid_{firebase_uid}")
+                print(f"Cache invalidated for doctor_uid_{firebase_uid}")
+
+            # If lab phone numbers are in the update, sync the lab_contacts table
+            if 'pathology_lab_phone' in update_data:
+                await self.create_or_update_lab_contact_from_profile(
+                    doctor_firebase_uid=firebase_uid,
+                    lab_type='pathology',
+                    phone=update_data.get('pathology_lab_phone'),
+                    name=update_data.get('pathology_lab_name')
+                )
             
-            return bool(response.data)
+            if 'radiology_lab_phone' in update_data:
+                await self.create_or_update_lab_contact_from_profile(
+                    doctor_firebase_uid=firebase_uid,
+                    lab_type='radiology',
+                    phone=update_data.get('radiology_lab_phone'),
+                    name=update_data.get('radiology_lab_name')
+                )
+
+            return True
         except Exception as e:
-            print(f"Error updating doctor: {e}")
-            print(f"Traceback: {traceback.format_exc()}")
+            print(f"Error updating doctor profile: {e}")
             return False
+
+    async def create_or_update_lab_contact_from_profile(self, doctor_firebase_uid: str, lab_type: str, phone: Optional[str], name: Optional[str]):
+        """
+        Creates or updates a lab contact entry based on doctor's profile data.
+        This is intended to keep the lab_contacts table in sync.
+        """
+        if not phone:
+            # If the phone number is removed from the profile, we might want to deactivate or delete the lab contact.
+            # For now, we'll just log it. A more robust implementation could handle this.
+            print(f"Lab phone for {lab_type} was cleared for doctor {doctor_firebase_uid}. No action taken in lab_contacts.")
+            return
+
+        try:
+            # Check if a lab contact already exists for this doctor and lab type
+            existing_contact_response = await self.supabase.table("lab_contacts").select("id, contact_phone, lab_name").eq("doctor_firebase_uid", doctor_firebase_uid).eq("lab_type", lab_type).execute()
+            
+            update_data = {
+                "contact_phone": phone,
+                "lab_name": name or f"Default {lab_type.capitalize()} Lab",
+                "is_active": True,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+
+            if existing_contact_response.data:
+                # Update the existing lab contact
+                contact_id = existing_contact_response.data[0]['id']
+                await self.supabase.table("lab_contacts").update(update_data).eq("id", contact_id).execute()
+                print(f"Updated existing {lab_type} lab contact for doctor {doctor_firebase_uid}.")
+            else:
+                # Create a new lab contact
+                insert_data = {
+                    **update_data,
+                    "doctor_firebase_uid": doctor_firebase_uid,
+                    "lab_type": lab_type,
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                }
+                await self.supabase.table("lab_contacts").insert(insert_data).execute()
+                print(f"Created new {lab_type} lab contact for doctor {doctor_firebase_uid}.")
+
+        except Exception as e:
+            print(f"Error syncing {lab_type} lab contact for doctor {doctor_firebase_uid}: {e}")
+            # We don't re-raise the exception to avoid failing the entire profile update
+
     async def delete_patient(self, patient_id: int, doctor_firebase_uid: str) -> bool:
         try:
-            # Run the synchronous Supabase calls in a thread pool
-            loop = asyncio.get_event_loop()
-            
-            # First verify the patient belongs to this doctor
-            result = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("patients").select("*").eq("id", patient_id).eq("created_by_doctor", doctor_firebase_uid).execute()
-            )
-            
-            if not result.data:
+            # First, verify the doctor owns the patient
+            patient_response = await self.supabase.table("patients").select("id").eq("id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
+            if not patient_response.data:
+                print(f"Unauthorized or patient not found: patient_id={patient_id}, doctor_uid={doctor_firebase_uid}")
                 return False
-                
-            # Delete the patient
-            delete_result = await loop.run_in_executor(
-                self.executor,
-                lambda: self.supabase.table("patients").delete().eq("id", patient_id).eq("created_by_doctor", doctor_firebase_uid).execute()
-            )
             
-            return len(delete_result.data) > 0
+            # If authorized, proceed with deletion
+            response = await self.supabase.table("patients").delete().eq("id", patient_id).execute()
+            
+            if response.data:
+                print(f"Patient with id {patient_id} deleted successfully.")
+                return True
+            else:
+                print(f"Failed to delete patient with id {patient_id}.")
+                return False
             
         except Exception as e:
-            print(f"Database error deleting patient: {e}")
-            print(f"Traceback: {traceback.format_exc()}")
+            print(f"Error deleting patient: {e}")
             return False
+    
     # Patient related operations
     async def get_patient_by_id(self, patient_id: int, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
         """Get patient by ID for a specific doctor"""
