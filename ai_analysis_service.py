@@ -16,7 +16,7 @@ import concurrent.futures
 
 class AIAnalysisService:
     def __init__(self):
-        """Initialize the AI Analysis Service with Gemini 2.0 Flash"""
+        """Initialize the AI Analysis Service with Gemini 3.0 Pro (Vertex AI)"""
         # Try GOOGLE_API_KEY first (as per README), fallback to GEMINI_API_KEY for backward compatibility
         self.api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         if not self.api_key:
@@ -25,13 +25,14 @@ class AIAnalysisService:
         # Configure Gemini
         genai.configure(api_key=self.api_key)
         
-        # Initialize the model
-        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        # Initialize the model - Updated to Gemini 3.0 Pro
+        # Note: Ensure your API key has access to this model version
+        self.model = genai.GenerativeModel('gemini-3-pro-preview')
         
         # Create thread pool for sync operations
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
         
-        print("AI Analysis Service initialized with Gemini 2.0 Flash")
+        print("AI Analysis Service initialized with Gemini 3.0 Pro (Preview)")
     
     async def analyze_document(
         self, 
@@ -91,7 +92,7 @@ class AIAnalysisService:
                 "success": True,
                 "analysis": analysis_result,
                 "processed_at": datetime.now(timezone.utc).isoformat(),
-                "model_used": "gemini-2.0-flash-exp"
+                "model_used": "gemini-3-pro-preview"
             }
             
         except Exception as e:
