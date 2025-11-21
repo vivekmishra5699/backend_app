@@ -9931,7 +9931,8 @@ async def get_lab_dashboard(
             return {
                 "message": "No lab contact found for this phone number",
                 "phone": phone,
-                "requests": []
+                "requests": [],
+                "lab_contact_info": None
             }
         
         # Get lab report requests
@@ -9940,26 +9941,26 @@ async def get_lab_dashboard(
         # Format the response with detailed info
         formatted_requests = []
         for req in requests:
-            patient = req.get("patients", {})
-            visit = req.get("visits", {})
+            patient = req.get("patients") or {}
+            visit = req.get("visits") or {}
             
             formatted_request = {
-                "id": req["id"],
-                "visit_id": req["visit_id"],
-                "patient_id": req["patient_id"],
-                "doctor_firebase_uid": req["doctor_firebase_uid"],
-                "patient_name": req["patient_name"],
-                "report_type": req["report_type"],
-                "test_name": req["test_name"],
+                "id": req.get("id"),
+                "visit_id": req.get("visit_id"),
+                "patient_id": req.get("patient_id"),
+                "doctor_firebase_uid": req.get("doctor_firebase_uid"),
+                "patient_name": req.get("patient_name", ""),
+                "report_type": req.get("report_type", ""),
+                "test_name": req.get("test_name", ""),
                 "instructions": req.get("instructions"),
-                "status": req["status"],
-                "request_token": req["request_token"],
-                "expires_at": req["expires_at"],
-                "created_at": req["created_at"],
-                "patient_phone": patient.get("phone"),
-                "visit_date": visit.get("visit_date"),
-                "visit_type": visit.get("visit_type"),
-                "chief_complaint": visit.get("chief_complaint"),
+                "status": req.get("status", "pending"),
+                "request_token": req.get("request_token", ""),
+                "expires_at": req.get("expires_at", ""),
+                "created_at": req.get("created_at", ""),
+                "patient_phone": patient.get("phone") if isinstance(patient, dict) else None,
+                "visit_date": visit.get("visit_date") if isinstance(visit, dict) else None,
+                "visit_type": visit.get("visit_type") if isinstance(visit, dict) else None,
+                "chief_complaint": visit.get("chief_complaint") if isinstance(visit, dict) else None,
                 "contact_source": req.get("contact_source", "unknown")
             }
             formatted_requests.append(formatted_request)
@@ -9969,7 +9970,8 @@ async def get_lab_dashboard(
             "phone": phone,
             "total_requests": len(formatted_requests),
             "pending_count": len([r for r in formatted_requests if r["status"] == "pending"]),
-            "requests": formatted_requests
+            "requests": formatted_requests,
+            "message": f"Found {len(formatted_requests)} requests" if formatted_requests else "No requests found yet. Doctor may need to create lab requests for visits."
         }
         
     except Exception as e:
@@ -9979,7 +9981,6 @@ async def get_lab_dashboard(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get lab dashboard"
         )
-
 # Debug upload and alternative lab-upload endpoints removed.
 # Use `/api/lab-upload-reports` for lab uploads and the lab dashboard endpoints for lab workflows.
 
@@ -10080,23 +10081,50 @@ async def lab_upload_reports(
             try:
                 bucket_path = f"reports/visit_{request_data['visit_id']}/{unique_filename}"
                 
-                await loop.run_in_executor(
-                    None,
-                    lambda: supabase.storage.from_("medical-reports").upload(
-                        path=bucket_path,
-                        file=file_content,
-                        file_options={
-                            "content-type": file.content_type or "application/octet-stream",
-                            "x-upsert": "false"
-                        }
+                # Upload to storage. The Supabase storage API may return a coroutine or a sync result
+                upload_result = supabase.storage.from_("medical-reports").upload(
+                    path=bucket_path,
+                    file=file_content,
+                    file_options={
+                        "content-type": file.content_type or "application/octet-stream",
+                        "x-upsert": "false"
+                    }
+                )
+                if asyncio.iscoroutine(upload_result):
+                    upload_result = await upload_result
+                
+                def _extract_storage_url(result):
+                    if isinstance(result, str):
+                        return result
+                    if isinstance(result, dict):
+                        data = result.get("data") if isinstance(result.get("data"), dict) else None
+                        for key in ("publicUrl", "publicURL", "signedUrl", "signedURL"):
+                            if key in result:
+                                return result[key]
+                            if data and key in data:
+                                return data[key]
+                    return None
+
+                url_result = supabase.storage.from_("medical-reports").get_public_url(bucket_path)
+                if asyncio.iscoroutine(url_result):
+                    url_result = await url_result
+                file_url = _extract_storage_url(url_result)
+
+                if not file_url:
+                    signed_result = supabase.storage.from_("medical-reports").create_signed_url(
+                        bucket_path,
+                        60 * 60 * 24 * 7
                     )
-                )
-                
-                file_url = await loop.run_in_executor(
-                    None,
-                    lambda: supabase.storage.from_("medical-reports").get_public_url(bucket_path)
-                )
-                
+                    if asyncio.iscoroutine(signed_result):
+                        signed_result = await signed_result
+                    file_url = _extract_storage_url(signed_result)
+
+                if not file_url:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to generate public URL for uploaded file"
+                    )
+
                 print(f"Lab file uploaded to reports folder: {file.filename} -> {bucket_path}")
             except Exception as storage_error:
                 print(f"Error uploading to storage: {storage_error}")
@@ -10107,24 +10135,49 @@ async def lab_upload_reports(
                 
             # Create a temporary upload token for lab uploads to satisfy foreign key constraint
             lab_upload_token = str(uuid.uuid4())
-            
-            # Create temporary upload link for lab uploads
+
+            # Resolve/validate doctor UID to avoid FK constraint failures.
+            requested_doctor_uid = request_data.get("doctor_firebase_uid")
+            resolved_doctor_uid = requested_doctor_uid
+
+            valid_doctor = None
+            if requested_doctor_uid:
+                valid_doctor = await db.get_doctor_by_firebase_uid(requested_doctor_uid)
+
+            if not valid_doctor:
+                # Try to resolve via the lab contact nested in the request
+                lab_contact = request_data.get("lab_contacts") or {}
+                contact_phone = lab_contact.get("contact_phone")
+                if contact_phone:
+                    lab_info = await db.get_lab_contact_by_phone(contact_phone)
+                    if lab_info and lab_info.get("doctor_firebase_uid"):
+                        candidate_uid = lab_info.get("doctor_firebase_uid")
+                        cand = await db.get_doctor_by_firebase_uid(candidate_uid)
+                        if cand:
+                            resolved_doctor_uid = candidate_uid
+                            print(f"Resolved doctor UID via lab contact: {resolved_doctor_uid}")
+                        else:
+                            print(f"Lab contact returned doctor UID {candidate_uid} but no doctor record exists")
+                if not resolved_doctor_uid:
+                    print("Warning: Could not resolve a valid doctor UID for report upload; insert may fail due to FK constraints.")
+
+            # Create temporary upload link for lab uploads (use resolved_doctor_uid)
             link_data = {
                 "visit_id": request_data["visit_id"],
                 "patient_id": request_data["patient_id"],
-                "doctor_firebase_uid": request_data["doctor_firebase_uid"],
+                "doctor_firebase_uid": resolved_doctor_uid,
                 "upload_token": lab_upload_token,
                 "expires_at": (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
             }
-            
+
             await db.create_report_upload_link(link_data)
             print(f"Created temporary upload link for lab upload: {lab_upload_token}")
-            
+
             # Create report record using the same structure as regular uploads
             report_data = {
                 "visit_id": request_data["visit_id"],
                 "patient_id": request_data["patient_id"],
-                "doctor_firebase_uid": request_data["doctor_firebase_uid"],
+                "doctor_firebase_uid": resolved_doctor_uid,
                 "file_name": file.filename,
                 "file_size": file_size,
                 "file_type": file.content_type or "application/octet-stream",
@@ -10136,7 +10189,7 @@ async def lab_upload_reports(
                 "uploaded_at": datetime.now(timezone.utc).isoformat(),
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
-            
+
             created_report = await db.create_report_direct(report_data)
             if created_report:
                 uploaded_files.append({

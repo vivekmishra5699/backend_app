@@ -1809,109 +1809,132 @@ class DatabaseManager:
     async def get_lab_report_requests_by_phone(self, phone: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get lab report requests for a lab contact by phone (supports both profile contacts and lab_contacts table)"""
         try:
-            # First, get all doctors who have this phone number in their profile
-            # Use separate queries since .or_() may not be available
-            pathology_response = await self.supabase.table("doctors").select("firebase_uid, pathology_lab_phone, radiology_lab_phone").eq("pathology_lab_phone", phone).execute()
-            radiology_response = await self.supabase.table("doctors").select("firebase_uid, pathology_lab_phone, radiology_lab_phone").eq("radiology_lab_phone", phone).execute()
-            
-            # Combine doctor results
-            doctor_data = []
-            if pathology_response.data:
-                doctor_data.extend(pathology_response.data)
-            if radiology_response.data:
-                existing_uids = [d['firebase_uid'] for d in doctor_data]
-                for doctor in radiology_response.data:
-                    if doctor['firebase_uid'] not in existing_uids:
-                        doctor_data.append(doctor)
-            
-            doctors_response = type('obj', (object,), {'data': doctor_data})()
+            print(f"🔍 Fetching lab report requests for phone: {phone}, status: {status}")
             
             all_requests = []
             
-            if doctors_response.data:
-                # Get requests for doctors who have this phone number in their profile
-                for doctor in doctors_response.data:
+            # PRIMARY STRATEGY: Query by lab_contacts table (this is the source of truth)
+            print(f"\n=== PRIMARY: Query by lab_contacts table ===")
+            try:
+                lab_contact_response = await self.supabase.table("lab_contacts").select("*").eq("contact_phone", phone).execute()
+                print(f"Found {len(lab_contact_response.data) if lab_contact_response.data else 0} lab contacts with phone {phone}")
+                
+                if lab_contact_response.data:
+                    for lab_contact in lab_contact_response.data:
+                        lab_contact_id = lab_contact['id']
+                        doctor_uid = lab_contact.get('doctor_firebase_uid')
+                        print(f"  Lab contact ID: {lab_contact_id}, Doctor: {doctor_uid}")
+                        
+                        query = self.supabase.table("lab_report_requests").select("*").eq("lab_contact_id", lab_contact_id)
+                        
+                        if status:
+                            print(f"    Filtering by status = '{status}'")
+                            query = query.eq("status", status)
+                        
+                        response = await query.order("created_at", desc=True).execute()
+                        requests_count = len(response.data) if response.data else 0
+                        print(f"    Found {requests_count} requests")
+                        
+                        if response.data:
+                            for req in response.data:
+                                req["contact_source"] = "lab_contacts_table"
+                                req["contact_phone"] = phone
+                            all_requests.extend(response.data)
+            except Exception as e:
+                print(f"  Error in lab_contacts query: {e}")
+            
+            # SECONDARY STRATEGY: Query by doctor profile phone numbers
+            print(f"\n=== SECONDARY: Query by doctor profile phone ===")
+            try:
+                pathology_response = await self.supabase.table("doctors").select("firebase_uid, pathology_lab_phone, radiology_lab_phone").eq("pathology_lab_phone", phone).execute()
+                radiology_response = await self.supabase.table("doctors").select("firebase_uid, pathology_lab_phone, radiology_lab_phone").eq("radiology_lab_phone", phone).execute()
+                
+                doctor_data = []
+                if pathology_response.data:
+                    doctor_data.extend(pathology_response.data)
+                if radiology_response.data:
+                    existing_uids = [d['firebase_uid'] for d in doctor_data]
+                    for doctor in radiology_response.data:
+                        if doctor['firebase_uid'] not in existing_uids:
+                            doctor_data.append(doctor)
+                
+                print(f"Found {len(doctor_data)} doctors with this phone in profile")
+                
+                for doctor in doctor_data:
                     doctor_uid = doctor['firebase_uid']
+                    print(f"  Doctor UID: {doctor_uid}")
                     
-                    # Determine which lab types this phone number can handle for this doctor
                     lab_types = []
                     if doctor.get('pathology_lab_phone') == phone:
                         lab_types.append('pathology')
                     if doctor.get('radiology_lab_phone') == phone:
                         lab_types.append('radiology')
                     
-                    # Build query for this doctor's requests
-                    query = (self.supabase.table("lab_report_requests")
-                            .select("""
-                                *,
-                                patients!inner(
-                                    first_name,
-                                    last_name,
-                                    phone
-                                ),
-                                visits!inner(
-                                    visit_date,
-                                    visit_type,
-                                    chief_complaint
-                                )
-                            """)
-                            .eq("doctor_firebase_uid", doctor_uid))
+                    print(f"    Lab types: {lab_types}")
                     
-                    # Filter by lab types that this phone can handle
+                    query = self.supabase.table("lab_report_requests").select("*").eq("doctor_firebase_uid", doctor_uid)
+                    
                     if len(lab_types) == 1:
                         query = query.eq("report_type", lab_types[0])
                     elif len(lab_types) > 1:
-                        # Phone handles both types for this doctor
                         query = query.in_("report_type", lab_types)
                     
                     if status:
                         query = query.eq("status", status)
                     
-                    # Async Supabase call
                     response = await query.order("created_at", desc=True).execute()
+                    requests_count = len(response.data) if response.data else 0
+                    print(f"    Found {requests_count} requests")
                     
                     if response.data:
-                        # Add lab_types info to each request for context
                         for req in response.data:
                             req["available_lab_types"] = lab_types
                             req["contact_source"] = "doctor_profile"
                         all_requests.extend(response.data)
+            except Exception as e:
+                print(f"  Error in doctor profile query: {e}")
             
-            # Also check legacy lab_contacts table
-            lab_contact = await self.get_lab_contact_by_phone(phone)
-            if lab_contact and lab_contact.get("source") == "lab_contacts_table":
-                query = (self.supabase.table("lab_report_requests")
-                        .select("""
-                            *,
-                            patients!inner(
-                                first_name,
-                                last_name,
-                                phone
-                            ),
-                            visits!inner(
-                                visit_date,
-                                visit_type
-                            )
-                        """)
-                        .eq("lab_contact_id", lab_contact["id"]))
-                
-                if status:
-                    query = query.eq("status", status)
-                
-                # Async Supabase call
-                response = await query.order("created_at", desc=True).execute()
-                
-                if response.data:
-                    for req in response.data:
-                        req["contact_source"] = "lab_contacts_table"
-                    all_requests.extend(response.data)
+            # Deduplicate requests by ID
+            seen_ids = set()
+            unique_requests = []
+            for req in all_requests:
+                req_id = req.get('id')
+                if req_id not in seen_ids:
+                    seen_ids.add(req_id)
+                    unique_requests.append(req)
             
-            # Sort all requests by creation date
-            all_requests.sort(key=lambda x: x.get('created_at', ''), reverse=True)
-            return all_requests
+            print(f"\n📋 Total unique requests found: {len(unique_requests)}")
+            
+            # Now fetch with joins for the unique requests
+            if unique_requests:
+                print(f"🔄 Fetching full data with patient/visit info...")
+                request_ids = [r['id'] for r in unique_requests]
+                
+                query_with_joins = self.supabase.table("lab_report_requests").select("""
+                    *,
+                    patients(
+                        first_name,
+                        last_name,
+                        phone
+                    ),
+                    visits(
+                        visit_date,
+                        visit_type,
+                        chief_complaint
+                    )
+                """).in_("id", request_ids)
+                
+                response_with_joins = await query_with_joins.order("created_at", desc=True).execute()
+                final_requests = response_with_joins.data if response_with_joins.data else []
+                print(f"✅ Retrieved {len(final_requests)} requests with full data")
+                return final_requests
+            else:
+                print(f"⚠️  No requests found")
+                return []
             
         except Exception as e:
-            print(f"Error getting lab report requests: {e}")
+            print(f"❌ Error getting lab report requests: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
             return []
 
     async def get_lab_report_requests_by_visit_id(self, visit_id: int) -> List[Dict[str, Any]]:
