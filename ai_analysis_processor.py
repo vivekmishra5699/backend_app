@@ -212,7 +212,7 @@ class AIAnalysisProcessor:
                     "patient_id": patient_id,
                     "doctor_firebase_uid": doctor_firebase_uid,
                     "analysis_type": "document_analysis",
-                    "model_used": "gemini-3-pro-preview",
+                    "model_used": "gemini-2.0-flash-exp",
                     "confidence_score": 0.0,
                     "raw_analysis": "",
                     "analysis_success": False,
