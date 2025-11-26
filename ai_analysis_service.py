@@ -1,4 +1,5 @@
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import os
 import asyncio
 import traceback
@@ -16,22 +17,40 @@ import concurrent.futures
 
 class AIAnalysisService:
     def __init__(self):
-        """Initialize the AI Analysis Service with Gemini 2.0 Flash"""
-        # Try GOOGLE_API_KEY first (as per README), fallback to GEMINI_API_KEY for backward compatibility
-        self.api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        if not self.api_key:
-            raise ValueError("GOOGLE_API_KEY not found in environment variables")
+        """Initialize the AI Analysis Service with Gemini 3 Pro via Vertex AI"""
+        # Load configuration from environment variables (no hardcoded values)
+        self.project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+        self.location = os.getenv("GOOGLE_CLOUD_LOCATION", "global")
         
-        # Configure Gemini
-        genai.configure(api_key=self.api_key)
+        if not self.project_id:
+            raise ValueError("GOOGLE_CLOUD_PROJECT environment variable is required")
         
-        # Initialize the model
-        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        # Set environment variables for Gen AI SDK to use Vertex AI
+        os.environ["GOOGLE_CLOUD_PROJECT"] = self.project_id
+        os.environ["GOOGLE_CLOUD_LOCATION"] = self.location
+        os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
+        
+        # Set up Google Cloud credentials from environment variable
+        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if not credentials_path:
+            raise ValueError("GOOGLE_APPLICATION_CREDENTIALS environment variable is required")
+        
+        if not os.path.exists(credentials_path):
+            raise FileNotFoundError(f"GCP credentials file not found: {credentials_path}")
+        
+        print(f"Using GCP credentials from: {credentials_path}")
+        
+        # Initialize the Gen AI client for Vertex AI
+        self.client = genai.Client()
+        
+        # Model name for Gemini 3 Pro Preview
+        self.model_name = "gemini-3-pro-preview"
         
         # Create thread pool for sync operations
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=10)
         
-        print("AI Analysis Service initialized with Gemini 2.0 Flash")
+        print(f"AI Analysis Service initialized with Gemini 3 Pro via Vertex AI")
+        print(f"Project: {self.project_id}, Location: {self.location}")
     
     async def analyze_document(
         self, 
@@ -91,7 +110,7 @@ class AIAnalysisService:
                 "success": True,
                 "analysis": analysis_result,
                 "processed_at": datetime.now(timezone.utc).isoformat(),
-                "model_used": "gemini-2.0-flash-exp"
+                "model_used": self.model_name
             }
             
         except Exception as e:
@@ -391,30 +410,44 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
         document_data: Dict[str, Any],
         max_retries: int = 3
     ) -> Dict[str, Any]:
-        """Perform the actual AI analysis using Gemini with retry logic for rate limits"""
+        """Perform the actual AI analysis using Gemini 3 Pro with retry logic for rate limits"""
         
         for attempt in range(max_retries):
             try:
                 loop = asyncio.get_event_loop()
                 
-                # Prepare content for Gemini
+                # Prepare content for Gemini 3 Pro using Gen AI SDK
+                content_parts = []
+                
                 if document_data["type"] == "text":
-                    content = [prompt, document_data["content"]]
+                    content_parts = [prompt, document_data["content"]]
                 elif document_data["type"] == "image":
-                    # Create image object for Gemini
-                    image_part = {
-                        "mime_type": document_data["mime_type"],
-                        "data": document_data["content"]
-                    }
-                    content = [prompt, image_part]
+                    # Create image part using types.Part for Gemini 3
+                    image_part = types.Part.from_bytes(
+                        data=document_data["content"],
+                        mime_type=document_data["mime_type"]
+                    )
+                    content_parts = [prompt, image_part]
                 else:
                     # For PDF or other types, include as text if possible
-                    content = [prompt, f"Document content: {document_data.get('content', 'Unable to extract content')}"]
+                    content_parts = [prompt, f"Document content: {document_data.get('content', 'Unable to extract content')}"]
                 
-                # Generate response using Gemini
+                # Generate response using Gemini 3 Pro via Vertex AI
+                # Using LOW thinking level for faster responses in document analysis
+                def generate_sync():
+                    return self.client.models.generate_content(
+                        model=self.model_name,
+                        contents=content_parts,
+                        config=types.GenerateContentConfig(
+                            thinking_config=types.ThinkingConfig(
+                                thinking_level=types.ThinkingLevel.LOW  # Fast, low-latency for document analysis
+                            )
+                        )
+                    )
+                
                 response = await loop.run_in_executor(
                     self.executor,
-                    lambda: self.model.generate_content(content)
+                    generate_sync
                 )
                 
                 if response and response.text:
@@ -443,7 +476,7 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
                 error_message = str(e)
                 
                 # Check if it's a rate limit error (429)
-                if "429" in error_message or "Resource exhausted" in error_message:
+                if "429" in error_message or "Resource exhausted" in error_message or "RESOURCE_EXHAUSTED" in error_message:
                     if attempt < max_retries - 1:
                         # Exponential backoff: 2, 4, 8 seconds
                         wait_time = 2 ** (attempt + 1)
@@ -461,7 +494,8 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
                         }
                 else:
                     # Other errors - don't retry
-                    print(f"Error in Gemini analysis: {e}")
+                    print(f"Error in Gemini 3 Pro analysis: {e}")
+                    print(f"Traceback: {traceback.format_exc()}")
                     return {
                         "error": error_message,
                         "raw_analysis": "",
@@ -637,11 +671,23 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
                 individual_analyses, patient_context, visit_context, doctor_context
             )
             
-            # Generate consolidated insights
+            # Generate consolidated insights using Gemini 3 Pro
             loop = asyncio.get_event_loop()
+            
+            def generate_consolidated():
+                return self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=consolidated_prompt,
+                    config=types.GenerateContentConfig(
+                        thinking_config=types.ThinkingConfig(
+                            thinking_level=types.ThinkingLevel.HIGH  # High reasoning for consolidated analysis
+                        )
+                    )
+                )
+            
             response = await loop.run_in_executor(
                 self.executor,
-                lambda: self.model.generate_content(consolidated_prompt)
+                generate_consolidated
             )
             
             return {
@@ -757,11 +803,23 @@ Focus on creating a cohesive medical narrative that helps Dr. {doctor_name} make
                 analysis_period_months
             )
             
-            # Perform analysis
+            # Perform analysis using Gemini 3 Pro with HIGH thinking for complex reasoning
             loop = asyncio.get_event_loop()
+            
+            def generate_comprehensive():
+                return self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        thinking_config=types.ThinkingConfig(
+                            thinking_level=types.ThinkingLevel.HIGH  # High reasoning for comprehensive history analysis
+                        )
+                    )
+                )
+            
             response = await loop.run_in_executor(
                 self.executor,
-                lambda: self.model.generate_content(prompt)
+                generate_comprehensive
             )
             
             if response and response.text:
@@ -1042,9 +1100,17 @@ Please structure your response clearly with appropriate medical terminology whil
             }
     
     def _generate_text_response(self, prompt: str) -> str:
-        """Generate text response using Gemini model"""
+        """Generate text response using Gemini 3 Pro model"""
         try:
-            response = self.model.generate_content(prompt)
+            response = self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(
+                        thinking_level=types.ThinkingLevel.LOW  # Fast response for simple text generation
+                    )
+                )
+            )
             if response and response.text:
                 return response.text
             else:

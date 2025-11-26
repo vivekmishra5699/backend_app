@@ -7681,26 +7681,21 @@ async def upload_pdf_template(request: Request, current_doctor = Depends(get_cur
         unique_filename = f"{uuid.uuid4()}.{file_extension}"
         
         # Upload file to Supabase Storage
-        loop = asyncio.get_event_loop()
         bucket_path = f"pdf_templates/{current_doctor['firebase_uid']}/{unique_filename}"
         
         try:
-            await loop.run_in_executor(
-                None,
-                lambda: supabase.storage.from_("medical-reports").upload(
-                    path=bucket_path,
-                    file=file_content,
-                    file_options={
-                        "content-type": "application/pdf",
-                        "x-upsert": "false"
-                    }
-                )
+            # Use async storage methods directly
+            await supabase.storage.from_("medical-reports").upload(
+                path=bucket_path,
+                file=file_content,
+                file_options={
+                    "content-type": "application/pdf",
+                    "x-upsert": "false"
+                }
             )
             
-            file_url = await loop.run_in_executor(
-                None,
-                lambda: supabase.storage.from_("medical-reports").get_public_url(bucket_path)
-            )
+            # get_public_url is async in the async client
+            file_url = await supabase.storage.from_("medical-reports").get_public_url(bucket_path)
             
             print(f"PDF template uploaded to storage: {file.filename} -> {bucket_path}")
         except Exception as storage_error:
@@ -7727,10 +7722,7 @@ async def upload_pdf_template(request: Request, current_doctor = Depends(get_cur
         if not created_template:
             # Clean up storage if database insert fails
             try:
-                await loop.run_in_executor(
-                    None,
-                    lambda: supabase.storage.from_("medical-reports").remove([bucket_path])
-                )
+                await supabase.storage.from_("medical-reports").remove([bucket_path])
             except Exception:
                 pass
             raise HTTPException(

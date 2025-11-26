@@ -46,7 +46,7 @@ reportlab==4.0.7
 PyMuPDF==1.22.5
 
 # AI and Document Analysis
-google-generativeai>=0.3.0
+google-genai>=1.51.0
 pillow>=10.0.0
 python-magic>=0.4.27
 PyPDF2>=3.0.0
