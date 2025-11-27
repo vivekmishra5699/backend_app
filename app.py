@@ -4447,15 +4447,10 @@ async def delete_visit(visit_id: int, current_doctor = Depends(get_current_docto
             "storage_cleanup_errors": []
         }
         
-        loop = asyncio.get_event_loop()
-        
         # Helper function to safely delete files from storage
         async def safe_delete_file(storage_path: str, file_type: str) -> bool:
             try:
-                await loop.run_in_executor(
-                    None,
-                    lambda: supabase.storage.from_("medical-reports").remove([storage_path])
-                )
+                await supabase.storage.from_("medical-reports").remove([storage_path])
                 print(f"✅ Deleted {file_type} file: {storage_path}")
                 return True
             except Exception as storage_error:
@@ -4524,10 +4519,7 @@ async def delete_visit(visit_id: int, current_doctor = Depends(get_current_docto
             
             for folder_path in visit_folder_patterns:
                 try:
-                    folder_contents = await loop.run_in_executor(
-                        None,
-                        lambda: supabase.storage.from_("medical-reports").list(folder_path)
-                    )
+                    folder_contents = await supabase.storage.from_("medical-reports").list(folder_path)
                     
                     if not folder_contents:
                         print(f"📁 Visit folder {folder_path} is empty (will be cleaned up automatically)")
@@ -4716,24 +4708,19 @@ async def upload_handwritten_pdf(
         # Upload file to Supabase Storage
         storage_path = f"handwritten_notes/{current_doctor['firebase_uid']}/{unique_filename}"
         
-        loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(
-                None,
-                lambda: supabase.storage.from_("medical-reports").upload(
-                    path=storage_path,
-                    file=file_content,
-                    file_options={
-                        "content-type": "application/pdf",
-                        "x-upsert": "true"
-                    }
-                )
+            # Use async storage methods directly (not run_in_executor)
+            await supabase.storage.from_("medical-reports").upload(
+                path=storage_path,
+                file=file_content,
+                file_options={
+                    "content-type": "application/pdf",
+                    "x-upsert": "true"
+                }
             )
             
-            file_url = await loop.run_in_executor(
-                None,
-                lambda: supabase.storage.from_("medical-reports").get_public_url(storage_path)
-            )
+            # get_public_url is async in the async client
+            file_url = await supabase.storage.from_("medical-reports").get_public_url(storage_path)
             
             print(f"Handwritten PDF uploaded to storage: {storage_path}")
             
@@ -4787,13 +4774,85 @@ async def upload_handwritten_pdf(
             "file_size": file_size,
             "template_used": template["template_name"] if template else "Unknown",
             "whatsapp_sent": False,
-            "whatsapp_error": None
+            "whatsapp_error": None,
+            "ai_analysis": None,
+            "ai_analysis_error": None
         }
+        
+        # Initialize patient variable for later use (AI analysis and WhatsApp)
+        patient = None
+        
+        # Trigger AI analysis for the handwritten prescription
+        # This uses Gemini 3 Pro's multimodal capabilities to read handwriting
+        try:
+            if ai_analysis_service:
+                print(f"🖊️ Starting AI analysis for handwritten prescription (visit {visit_id})")
+                
+                # Get patient information for context
+                patient = await db.get_patient_by_id(visit["patient_id"], current_doctor["firebase_uid"])
+                
+                if patient:
+                    # Perform AI analysis on the handwritten prescription
+                    ai_result = await ai_analysis_service.analyze_handwritten_prescription(
+                        file_content=file_content,
+                        file_name=unique_filename,
+                        patient_context=patient,
+                        visit_context=visit,
+                        doctor_context=current_doctor
+                    )
+                    
+                    if ai_result["success"]:
+                        print(f"✅ AI analysis completed for handwritten prescription (visit {visit_id})")
+                        print(f"   Confidence: {ai_result['analysis'].get('confidence_score', 0):.2f}")
+                        
+                        # Add AI analysis to response
+                        response_data["ai_analysis"] = {
+                            "success": True,
+                            "raw_analysis": ai_result["analysis"].get("raw_analysis", ""),
+                            "confidence_score": ai_result["analysis"].get("confidence_score", 0),
+                            "extracted_medications": ai_result["analysis"].get("extracted_medications", []),
+                            "extracted_diagnosis": ai_result["analysis"].get("extracted_diagnosis", ""),
+                            "legibility_score": ai_result["analysis"].get("legibility_score", 7),
+                            "structured_analysis": ai_result["analysis"].get("structured_analysis", {}),
+                            "model_used": ai_result.get("model_used", "gemini-3-pro-preview"),
+                            "processed_at": ai_result.get("processed_at")
+                        }
+                        
+                        # Update handwritten note record with AI analysis
+                        if created_note:
+                            try:
+                                await db.update_handwritten_visit_note(
+                                    created_note["id"],
+                                    current_doctor["firebase_uid"],
+                                    {
+                                        "ai_analysis_raw": ai_result["analysis"].get("raw_analysis", "")[:10000],  # Limit size
+                                        "ai_analysis_confidence": ai_result["analysis"].get("confidence_score", 0),
+                                        "ai_analysis_at": datetime.now(timezone.utc).isoformat(),
+                                        "updated_at": datetime.now(timezone.utc).isoformat()
+                                    }
+                                )
+                            except Exception as update_error:
+                                print(f"Warning: Could not save AI analysis to handwritten note: {update_error}")
+                    else:
+                        print(f"❌ AI analysis failed for handwritten prescription: {ai_result.get('error')}")
+                        response_data["ai_analysis_error"] = ai_result.get("error", "Analysis failed")
+                else:
+                    print("Warning: Patient not found for AI analysis context")
+                    response_data["ai_analysis_error"] = "Patient context not available"
+            else:
+                print("Warning: AI analysis service not available")
+                response_data["ai_analysis_error"] = "AI analysis service not initialized"
+                
+        except Exception as ai_error:
+            print(f"Error during AI analysis of handwritten prescription: {ai_error}")
+            response_data["ai_analysis_error"] = str(ai_error)
+            # Don't fail the upload if AI analysis fails
         
         # Send WhatsApp message if requested
         if send_whatsapp:
-            # Get patient information
-            patient = await db.get_patient_by_id(visit["patient_id"], current_doctor["firebase_uid"])
+            # Use patient from AI analysis context if available, otherwise fetch
+            if not patient:
+                patient = await db.get_patient_by_id(visit["patient_id"], current_doctor["firebase_uid"])
             if patient and patient.get("phone"):
                 try:
                     whatsapp_result = await whatsapp_service.send_handwritten_visit_note(
@@ -5022,6 +5081,181 @@ async def resend_handwritten_note_whatsapp(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to resend handwritten note via WhatsApp: {str(e)}"
+        )
+
+@app.post("/handwritten-notes/{note_id}/analyze", response_model=dict)
+async def analyze_handwritten_note(
+    note_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Trigger AI analysis for a handwritten prescription PDF.
+    Uses Gemini 3 Pro's multimodal capabilities to read and interpret handwriting.
+    Can be used to re-analyze an existing handwritten note.
+    """
+    try:
+        # Get the handwritten note
+        note = await db.get_handwritten_visit_note_by_id(note_id, current_doctor["firebase_uid"])
+        if not note:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Handwritten note not found"
+            )
+        
+        if not ai_analysis_service:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="AI analysis service is not available"
+            )
+        
+        # Download the PDF from storage
+        storage_path = note["storage_path"]
+        if not storage_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="PDF file storage path not found"
+            )
+        
+        # Download the file for analysis
+        file_content = await file_downloader.download_from_supabase_storage(
+            supabase_client=supabase,
+            bucket_name="medical-reports",
+            file_path=storage_path
+        )
+        
+        if not file_content:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Could not download PDF file from storage"
+            )
+        
+        # Get visit and patient context
+        visit = await db.get_visit_by_id(note["visit_id"], current_doctor["firebase_uid"])
+        patient = await db.get_patient_by_id(note["patient_id"], current_doctor["firebase_uid"])
+        
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        print(f"🖊️ Starting AI analysis for handwritten note {note_id}")
+        
+        # Perform AI analysis
+        ai_result = await ai_analysis_service.analyze_handwritten_prescription(
+            file_content=file_content,
+            file_name=note["handwritten_pdf_filename"],
+            patient_context=patient,
+            visit_context=visit,
+            doctor_context=current_doctor
+        )
+        
+        if ai_result["success"]:
+            print(f"✅ AI analysis completed for handwritten note {note_id}")
+            print(f"   Confidence: {ai_result['analysis'].get('confidence_score', 0):.2f}")
+            
+            # Update handwritten note record with AI analysis
+            try:
+                await db.update_handwritten_visit_note(
+                    note_id,
+                    current_doctor["firebase_uid"],
+                    {
+                        "ai_analysis_raw": ai_result["analysis"].get("raw_analysis", "")[:10000],
+                        "ai_analysis_confidence": ai_result["analysis"].get("confidence_score", 0),
+                        "ai_analysis_at": datetime.now(timezone.utc).isoformat(),
+                        "updated_at": datetime.now(timezone.utc).isoformat()
+                    }
+                )
+            except Exception as update_error:
+                print(f"Warning: Could not save AI analysis to database: {update_error}")
+            
+            return {
+                "success": True,
+                "message": "AI analysis completed successfully",
+                "note_id": note_id,
+                "analysis": {
+                    "raw_analysis": ai_result["analysis"].get("raw_analysis", ""),
+                    "confidence_score": ai_result["analysis"].get("confidence_score", 0),
+                    "extracted_medications": ai_result["analysis"].get("extracted_medications", []),
+                    "extracted_diagnosis": ai_result["analysis"].get("extracted_diagnosis", ""),
+                    "legibility_score": ai_result["analysis"].get("legibility_score", 7),
+                    "structured_analysis": ai_result["analysis"].get("structured_analysis", {}),
+                    "model_used": ai_result.get("model_used", "gemini-3-pro-preview"),
+                    "processed_at": ai_result.get("processed_at")
+                }
+            }
+        else:
+            error_msg = ai_result.get("error", "Analysis failed")
+            print(f"❌ AI analysis failed for handwritten note {note_id}: {error_msg}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"AI analysis failed: {error_msg}"
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error analyzing handwritten note: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to analyze handwritten note: {str(e)}"
+        )
+
+@app.get("/handwritten-notes/{note_id}/analysis", response_model=dict)
+async def get_handwritten_note_analysis(
+    note_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """Get the AI analysis for a specific handwritten note"""
+    try:
+        # Get the handwritten note
+        note = await db.get_handwritten_visit_note_by_id(note_id, current_doctor["firebase_uid"])
+        if not note:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Handwritten note not found"
+            )
+        
+        # Check if analysis exists
+        if not note.get("ai_analysis_raw"):
+            return {
+                "has_analysis": False,
+                "message": "No AI analysis available for this handwritten note. Use POST /handwritten-notes/{note_id}/analyze to generate analysis."
+            }
+        
+        return {
+            "has_analysis": True,
+            "note_id": note_id,
+            "analysis": {
+                "raw_analysis": note.get("ai_analysis_raw", ""),
+                "confidence_score": float(note.get("ai_analysis_confidence", 0)),
+                "analyzed_at": note.get("ai_analysis_at"),
+                "extracted_diagnosis": note.get("ai_extracted_diagnosis", ""),
+                "extracted_medications": note.get("ai_extracted_medications", []),
+                "legibility_score": note.get("ai_legibility_score", 7)
+            },
+            "note_details": {
+                "visit_id": note["visit_id"],
+                "patient_id": note["patient_id"],
+                "file_name": note["handwritten_pdf_filename"],
+                "file_url": note["handwritten_pdf_url"],
+                "created_at": note.get("created_at")
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting handwritten note analysis: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get handwritten note analysis: {str(e)}"
         )
 
 @app.get("/visits/{visit_id}/handwriting-interface", response_class=HTMLResponse)
@@ -6305,23 +6539,17 @@ async def upload_reports(request: Request):
                 try:
                     bucket_path = f"reports/visit_{link_data['visit_id']}/{unique_filename}"
                     
-                    # Run blocking storage operations in a thread
-                    await loop.run_in_executor(
-                        None,
-                        lambda: supabase.storage.from_("medical-reports").upload(
-                            path=bucket_path,
-                            file=file_content,
-                            file_options={
-                                "content-type": file.content_type or "application/octet-stream",
-                                "x-upsert": "false"
-                            }
-                        )
+                    # Use async storage methods directly
+                    await supabase.storage.from_("medical-reports").upload(
+                        path=bucket_path,
+                        file=file_content,
+                        file_options={
+                            "content-type": file.content_type or "application/octet-stream",
+                            "x-upsert": "false"
+                        }
                     )
                     
-                    file_url = await loop.run_in_executor(
-                        None,
-                        lambda: supabase.storage.from_("medical-reports").get_public_url(bucket_path)
-                    )
+                    file_url = await supabase.storage.from_("medical-reports").get_public_url(bucket_path)
                     
                     print(f"File uploaded to Supabase Storage: {file.filename} -> {bucket_path}")
                 except Exception as storage_error:
@@ -6420,10 +6648,7 @@ async def upload_reports(request: Request):
                 else:
                     # If database insert failed, clean up the file from storage
                     try:
-                        await loop.run_in_executor(
-                            None,
-                            lambda: supabase.storage.from_("medical-reports").remove([bucket_path])
-                        )
+                        await supabase.storage.from_("medical-reports").remove([bucket_path])
                         print(f"Cleaned up storage file after database failure: {bucket_path}")
                     except Exception as cleanup_error:
                         print(f"Failed to cleanup storage file: {cleanup_error}")
@@ -6854,17 +7079,14 @@ async def send_patient_profile_pdf(
             pdf_filename = f"patient_profile_{patient_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
             storage_path = f"patient_profiles/{current_doctor['firebase_uid']}/{pdf_filename}"
 
-            # Upload to storage - ensure header values are strings
-            await loop.run_in_executor(
-                None,
-                lambda: supabase.storage.from_("medical-reports").upload(
-                    path=storage_path,
-                    file=pdf_bytes,
-                    file_options={
-                        "content-type": "application/pdf",
-                        "x-upsert": "true",
-                    },
-                )
+            # Upload to storage using async methods
+            await supabase.storage.from_("medical-reports").upload(
+                path=storage_path,
+                file=pdf_bytes,
+                file_options={
+                    "content-type": "application/pdf",
+                    "x-upsert": "true",
+                },
             )
 
             # Try to get a public URL; fall back to signed URL
@@ -6884,17 +7106,11 @@ async def send_patient_profile_pdf(
                         return data["signedURL"]
                 return None
 
-            public_res = await loop.run_in_executor(
-                None,
-                lambda: supabase.storage.from_("medical-reports").get_public_url(storage_path)
-            )
+            public_res = await supabase.storage.from_("medical-reports").get_public_url(storage_path)
             pdf_url = _extract_url(public_res)
 
             if not pdf_url:
-                signed_res = await loop.run_in_executor(
-                    None,
-                    lambda: supabase.storage.from_("medical-reports").create_signed_url(storage_path, 60 * 60 * 24 * 7)
-                )
+                signed_res = await supabase.storage.from_("medical-reports").create_signed_url(storage_path, 60 * 60 * 24 * 7)
                 pdf_url = _extract_url(signed_res)
 
             if not pdf_url:
@@ -7839,11 +8055,7 @@ async def delete_pdf_template(template_id: int, current_doctor = Depends(get_cur
         # Delete file from storage
         if existing_template.get("storage_path"):
             try:
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(
-                    None,
-                    lambda: supabase.storage.from_("medical-reports").remove([existing_template["storage_path"]])
-                )
+                await supabase.storage.from_("medical-reports").remove([existing_template["storage_path"]])
                 print(f"Deleted template file from storage: {existing_template['storage_path']}")
             except Exception as storage_error:
                 print(f"Warning: Failed to delete template file from storage: {storage_error}")
@@ -7952,25 +8164,18 @@ async def generate_visit_report(
         report_filename = f"visit_report_{visit_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
         storage_path = f"visit_reports/{current_doctor['firebase_uid']}/{report_filename}"
         
-        # Upload report to Supabase Storage
-        loop = asyncio.get_event_loop()
+        # Upload report to Supabase Storage using async methods
         try:
-            await loop.run_in_executor(
-                None,
-                lambda: supabase.storage.from_("medical-reports").upload(
-                    path=storage_path,
-                    file=pdf_bytes,
-                    file_options={
-                        "content-type": "application/pdf",
-                        "x-upsert": "true"
-                    }
-                )
+            await supabase.storage.from_("medical-reports").upload(
+                path=storage_path,
+                file=pdf_bytes,
+                file_options={
+                    "content-type": "application/pdf",
+                    "x-upsert": "true"
+                }
             )
             
-            file_url = await loop.run_in_executor(
-                None,
-                lambda: supabase.storage.from_("medical-reports").get_public_url(storage_path)
-            )
+            file_url = await supabase.storage.from_("medical-reports").get_public_url(storage_path)
             
             print(f"Visit report uploaded to storage: {storage_path}")
         except Exception as storage_error:

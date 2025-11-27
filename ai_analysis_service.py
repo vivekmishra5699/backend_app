@@ -1119,6 +1119,445 @@ Please structure your response clearly with appropriate medical terminology whil
             print(f"Error generating text response: {e}")
             return ""
     
+    async def analyze_handwritten_prescription(
+        self,
+        file_content: bytes,
+        file_name: str,
+        patient_context: Dict[str, Any],
+        visit_context: Dict[str, Any],
+        doctor_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Analyze a handwritten prescription PDF using Gemini 3 Pro's multimodal capabilities.
+        This extracts and interprets handwritten medical notes from the prescription pad.
+        
+        Args:
+            file_content: The binary content of the PDF file
+            file_name: Name of the file
+            patient_context: Patient information
+            visit_context: Visit information (may be minimal if doctor only wrote on prescription)
+            doctor_context: Doctor information
+        
+        Returns:
+            Dict containing analysis results including extracted content and medical interpretation
+        """
+        try:
+            print(f"🖊️ Starting handwritten prescription analysis for: {file_name}")
+            
+            # Prepare the PDF document - Gemini 3 Pro can directly handle PDFs
+            document_data = {
+                "type": "pdf",
+                "content": file_content,
+                "mime_type": "application/pdf"
+            }
+            
+            # Create specialized prompt for handwritten prescription analysis
+            prompt = self._create_handwritten_prescription_prompt(
+                patient_context,
+                visit_context,
+                doctor_context,
+                file_name
+            )
+            
+            # Perform AI analysis using multimodal capabilities
+            analysis_result = await self._perform_handwritten_analysis(prompt, document_data)
+            
+            if "error" in analysis_result and analysis_result.get("error"):
+                return {
+                    "success": False,
+                    "error": analysis_result["error"],
+                    "analysis": None
+                }
+            
+            return {
+                "success": True,
+                "analysis": analysis_result,
+                "processed_at": datetime.now(timezone.utc).isoformat(),
+                "model_used": self.model_name,
+                "analysis_type": "handwritten_prescription"
+            }
+            
+        except Exception as e:
+            print(f"❌ Error in handwritten prescription analysis: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return {
+                "success": False,
+                "error": str(e),
+                "analysis": None
+            }
+    
+    def _create_handwritten_prescription_prompt(
+        self,
+        patient_context: Dict[str, Any],
+        visit_context: Dict[str, Any],
+        doctor_context: Dict[str, Any],
+        file_name: str
+    ) -> str:
+        """Create a specialized prompt for analyzing handwritten prescription PDFs"""
+        
+        # Extract patient information
+        patient_name = f"{patient_context.get('first_name', '')} {patient_context.get('last_name', '')}"
+        patient_age = self._calculate_age(patient_context.get('date_of_birth', ''))
+        patient_gender = patient_context.get('gender', 'Not specified')
+        medical_history = patient_context.get('medical_history', 'None provided')
+        allergies = patient_context.get('allergies', 'None known')
+        blood_group = patient_context.get('blood_group', 'Not specified')
+        
+        # Extract visit information (may be partial since doctor wrote on prescription)
+        visit_date = visit_context.get('visit_date', 'Not specified')
+        visit_type = visit_context.get('visit_type', 'General consultation')
+        chief_complaint = visit_context.get('chief_complaint', 'See handwritten notes')
+        symptoms = visit_context.get('symptoms', 'See handwritten notes')
+        
+        # Extract vitals if available
+        vitals_text = "Not recorded digitally"
+        if visit_context.get('vitals'):
+            vitals = visit_context.get('vitals', {})
+            vitals_parts = []
+            if vitals.get('blood_pressure'):
+                vitals_parts.append(f"BP: {vitals['blood_pressure']}")
+            if vitals.get('pulse'):
+                vitals_parts.append(f"Pulse: {vitals['pulse']} bpm")
+            if vitals.get('temperature'):
+                vitals_parts.append(f"Temp: {vitals['temperature']}°F")
+            if vitals.get('weight'):
+                vitals_parts.append(f"Weight: {vitals['weight']} kg")
+            if vitals.get('spo2'):
+                vitals_parts.append(f"SpO2: {vitals['spo2']}%")
+            if vitals_parts:
+                vitals_text = ", ".join(vitals_parts)
+        
+        # Extract doctor information
+        doctor_name = f"Dr. {doctor_context.get('first_name', '')} {doctor_context.get('last_name', '')}"
+        specialization = doctor_context.get('specialization', 'General Medicine')
+        
+        prompt = f"""
+You are an advanced AI medical assistant with specialized training in reading and interpreting handwritten medical documents. You are helping {doctor_name} ({specialization}) by analyzing a handwritten prescription/visit notes for their patient.
+
+**IMPORTANT CONTEXT:**
+This is a HANDWRITTEN prescription pad that the doctor has filled out during the patient consultation. The doctor chose to write on the prescription pad instead of typing details into the system. Your task is to:
+1. EXTRACT all handwritten content from the prescription
+2. INTERPRET the medical content correctly
+3. PROVIDE clinical analysis of the documented information
+
+**PATIENT INFORMATION (from system):**
+- Name: {patient_name}
+- Age: {patient_age}
+- Gender: {patient_gender}
+- Blood Group: {blood_group}
+- Known Allergies: {allergies}
+- Medical History: {medical_history}
+
+**VISIT CONTEXT (from system):**
+- Visit Date: {visit_date}
+- Visit Type: {visit_type}
+- Chief Complaint (if entered): {chief_complaint}
+- Symptoms (if entered): {symptoms}
+- Vitals (if recorded): {vitals_text}
+
+**DOCUMENT TO ANALYZE:**
+- File Name: {file_name}
+- Document Type: Handwritten Prescription/Visit Notes
+
+**ANALYSIS INSTRUCTIONS:**
+
+Please provide a comprehensive analysis in this format:
+
+**1. HANDWRITING EXTRACTION:**
+📝 Extract ALL readable text from the handwritten prescription:
+- Header information (date, patient name if written)
+- Chief complaint / reason for visit
+- History of present illness
+- Clinical examination findings
+- Diagnosis (Rx/Dx)
+- Treatment plan
+- Medications prescribed (with dosage, frequency, duration)
+- Special instructions
+- Follow-up notes
+- Any drawings, diagrams, or annotations
+
+**2. MEDICATION ANALYSIS:**
+💊 For each medication identified:
+- Drug name (generic and brand if mentioned)
+- Dosage
+- Route of administration
+- Frequency
+- Duration
+- Food/timing instructions
+- Any warnings or precautions written
+
+**3. CLINICAL INTERPRETATION:**
+🏥 Based on the handwritten notes:
+- What condition(s) is the doctor treating?
+- Is the diagnosis clear from the handwriting?
+- Are the medications appropriate for the apparent diagnosis?
+- Any potential drug interactions to note?
+- Appropriateness for patient's age ({patient_age}) and medical history
+
+**4. ALLERGY & SAFETY CHECK:**
+⚠️ Cross-reference with patient's known allergies ({allergies}):
+- Any prescribed medications that might conflict with allergies?
+- Any contraindications based on medical history ({medical_history})?
+- Any safety concerns?
+
+**5. PATIENT INSTRUCTIONS SUMMARY:**
+📋 Clear summary for the patient:
+- Diagnosis in simple terms
+- Medication schedule in easy-to-understand format
+- Lifestyle or dietary instructions
+- Warning signs to watch for
+- When to return for follow-up
+
+**6. CLINICAL DOCUMENTATION:**
+📁 Structured data extracted for medical records:
+- Diagnosis (ICD codes if determinable)
+- Procedures performed (if any)
+- Medications prescribed (structured format)
+- Follow-up plan
+
+**7. HANDWRITING QUALITY NOTES:**
+✍️ Assessment of document:
+- Overall legibility score (1-10)
+- Any sections that were difficult to read
+- Any ambiguous medications or dosages that need verification
+- Recommendations for clarification if needed
+
+**8. VISIT SUMMARY:**
+📊 Comprehensive summary of this visit based on the handwritten prescription:
+- Primary diagnosis
+- Secondary findings
+- Treatment approach
+- Prognosis indicators
+- Critical follow-up requirements
+
+**CRITICAL GUIDELINES:**
+✓ If handwriting is unclear, indicate uncertainty with [?] or [unclear]
+✓ For medications, if unsure of exact spelling, provide best interpretation with alternatives
+✓ Flag any potentially dangerous prescriptions or dosages
+✓ Consider patient's age and medical history in analysis
+✓ Note if the handwriting suggests any urgency or severity
+✓ Preserve doctor's original intent while clarifying for records
+
+This analysis will help ensure accurate medical records and patient safety by properly interpreting Dr. {doctor_name}'s handwritten prescription for {patient_name}.
+"""
+        
+        return prompt
+    
+    async def _perform_handwritten_analysis(
+        self,
+        prompt: str,
+        document_data: Dict[str, Any],
+        max_retries: int = 3
+    ) -> Dict[str, Any]:
+        """Perform AI analysis on handwritten prescription using Gemini 3 Pro multimodal"""
+        
+        for attempt in range(max_retries):
+            try:
+                loop = asyncio.get_event_loop()
+                
+                # For handwritten PDFs, we send the PDF directly to Gemini 3 Pro
+                # which has excellent multimodal capabilities for reading handwriting
+                pdf_part = types.Part.from_bytes(
+                    data=document_data["content"],
+                    mime_type="application/pdf"
+                )
+                
+                content_parts = [prompt, pdf_part]
+                
+                # Use HIGH thinking level for handwritten analysis 
+                # as it requires more reasoning to interpret handwriting
+                def generate_sync():
+                    return self.client.models.generate_content(
+                        model=self.model_name,
+                        contents=content_parts,
+                        config=types.GenerateContentConfig(
+                            thinking_config=types.ThinkingConfig(
+                                thinking_level=types.ThinkingLevel.HIGH  # High reasoning for handwriting interpretation
+                            )
+                        )
+                    )
+                
+                response = await loop.run_in_executor(
+                    self.executor,
+                    generate_sync
+                )
+                
+                if response and response.text:
+                    analysis_text = response.text
+                    
+                    # Parse the structured response for handwritten prescriptions
+                    parsed_analysis = self._parse_handwritten_analysis_response(analysis_text)
+                    
+                    return {
+                        "raw_analysis": analysis_text,
+                        "structured_analysis": parsed_analysis,
+                        "confidence_score": self._calculate_handwriting_confidence(analysis_text),
+                        "analysis_length": len(analysis_text),
+                        "extracted_medications": parsed_analysis.get("medications", []),
+                        "extracted_diagnosis": parsed_analysis.get("diagnosis", ""),
+                        "legibility_score": parsed_analysis.get("legibility_score", 7)
+                    }
+                else:
+                    return {
+                        "error": "No response from AI model",
+                        "raw_analysis": "",
+                        "structured_analysis": {},
+                        "confidence_score": 0.0
+                    }
+                    
+            except Exception as e:
+                error_message = str(e)
+                
+                # Check if it's a rate limit error (429)
+                if "429" in error_message or "Resource exhausted" in error_message or "RESOURCE_EXHAUSTED" in error_message:
+                    if attempt < max_retries - 1:
+                        wait_time = 2 ** (attempt + 1)
+                        print(f"⚠️ Rate limit hit. Retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"❌ Rate limit exceeded after {max_retries} attempts")
+                        return {
+                            "error": "Rate limit exceeded. Please try again later.",
+                            "raw_analysis": "",
+                            "structured_analysis": {},
+                            "confidence_score": 0.0
+                        }
+                else:
+                    print(f"❌ Error in handwritten analysis: {e}")
+                    print(f"Traceback: {traceback.format_exc()}")
+                    return {
+                        "error": error_message,
+                        "raw_analysis": "",
+                        "structured_analysis": {},
+                        "confidence_score": 0.0
+                    }
+        
+        return {
+            "error": "Analysis failed after retries",
+            "raw_analysis": "",
+            "structured_analysis": {},
+            "confidence_score": 0.0
+        }
+    
+    def _parse_handwritten_analysis_response(self, analysis_text: str) -> Dict[str, Any]:
+        """Parse the handwritten prescription analysis response"""
+        try:
+            sections = {
+                "extracted_text": "",
+                "medications": [],
+                "diagnosis": "",
+                "clinical_interpretation": "",
+                "safety_check": "",
+                "patient_instructions": "",
+                "clinical_documentation": "",
+                "legibility_score": 7,
+                "visit_summary": "",
+                "handwriting_notes": ""
+            }
+            
+            current_section = None
+            lines = analysis_text.split('\n')
+            
+            for line in lines:
+                line = line.strip()
+                
+                # Check for section headers
+                if "HANDWRITING EXTRACTION" in line.upper():
+                    current_section = "extracted_text"
+                elif "MEDICATION ANALYSIS" in line.upper():
+                    current_section = "medications"
+                elif "CLINICAL INTERPRETATION" in line.upper():
+                    current_section = "clinical_interpretation"
+                elif "ALLERGY" in line.upper() and "SAFETY" in line.upper():
+                    current_section = "safety_check"
+                elif "PATIENT INSTRUCTIONS" in line.upper():
+                    current_section = "patient_instructions"
+                elif "CLINICAL DOCUMENTATION" in line.upper():
+                    current_section = "clinical_documentation"
+                elif "HANDWRITING QUALITY" in line.upper():
+                    current_section = "handwriting_notes"
+                elif "VISIT SUMMARY" in line.upper():
+                    current_section = "visit_summary"
+                elif line and current_section:
+                    # Extract legibility score if found
+                    if current_section == "handwriting_notes" and "legibility" in line.lower():
+                        import re
+                        score_match = re.search(r'(\d+)\s*/?\s*10', line)
+                        if score_match:
+                            sections["legibility_score"] = int(score_match.group(1))
+                    
+                    # Add content to current section
+                    clean_line = line.lstrip('📝💊🏥⚠️📋📁✍️📊-•*')
+                    if clean_line and not clean_line.startswith('**'):
+                        if current_section == "medications":
+                            # Try to extract medications as list items
+                            if clean_line and not clean_line.startswith('For each'):
+                                sections["medications"].append(clean_line)
+                        elif current_section in sections and isinstance(sections[current_section], str):
+                            if sections[current_section]:
+                                sections[current_section] += " " + clean_line
+                            else:
+                                sections[current_section] = clean_line
+            
+            # Try to extract diagnosis from clinical interpretation or documentation
+            if not sections["diagnosis"]:
+                for section_text in [sections["clinical_interpretation"], sections["clinical_documentation"], sections["visit_summary"]]:
+                    if "diagnosis" in section_text.lower() or "treating" in section_text.lower():
+                        sections["diagnosis"] = section_text[:200]
+                        break
+            
+            return sections
+            
+        except Exception as e:
+            print(f"Error parsing handwritten analysis: {e}")
+            return {
+                "extracted_text": analysis_text[:500] if len(analysis_text) > 500 else analysis_text,
+                "medications": [],
+                "diagnosis": "",
+                "clinical_interpretation": "",
+                "safety_check": "",
+                "patient_instructions": "",
+                "clinical_documentation": "",
+                "legibility_score": 5,
+                "visit_summary": "",
+                "handwriting_notes": ""
+            }
+    
+    def _calculate_handwriting_confidence(self, analysis_text: str) -> float:
+        """Calculate confidence score for handwritten prescription analysis"""
+        try:
+            base_score = 0.65  # Start slightly lower for handwritten docs
+            
+            # Increase score based on content indicators
+            if len(analysis_text) > 1500:
+                base_score += 0.1
+            if len(analysis_text) > 3000:
+                base_score += 0.1
+            
+            # Positive indicators (clear extraction)
+            positive_indicators = [
+                'medication', 'dosage', 'mg', 'tablet', 'times daily',
+                'diagnosis', 'examination', 'prescription', 'follow-up'
+            ]
+            
+            # Negative indicators (uncertainty)
+            negative_indicators = [
+                'unclear', 'illegible', 'uncertain', 'cannot read',
+                'ambiguous', 'difficult to interpret', '[?]'
+            ]
+            
+            positive_count = sum(1 for ind in positive_indicators if ind.lower() in analysis_text.lower())
+            negative_count = sum(1 for ind in negative_indicators if ind.lower() in analysis_text.lower())
+            
+            base_score += min(0.15, positive_count * 0.02)
+            base_score -= min(0.2, negative_count * 0.05)
+            
+            return max(0.3, min(0.95, base_score))
+            
+        except:
+            return 0.6
+    
     def __del__(self):
         """Cleanup thread pool executor"""
         if hasattr(self, 'executor'):
