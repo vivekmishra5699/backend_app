@@ -851,6 +851,9 @@ class VisitCreate(BaseModel):
     payment_date: Optional[str] = None
     discount: Optional[float] = None
     notes_billing: Optional[str] = None
+    # Linked visits feature - for follow-up visits
+    parent_visit_id: Optional[int] = None  # Link to previous visit for context
+    link_reason: Optional[str] = None  # Reason for follow-up (e.g., "Follow-up for treatment")
 
 class VisitUpdate(BaseModel):
     visit_date: Optional[str] = None
@@ -878,6 +881,9 @@ class VisitUpdate(BaseModel):
     payment_date: Optional[str] = None
     discount: Optional[float] = None
     notes_billing: Optional[str] = None
+    # Linked visits feature
+    parent_visit_id: Optional[int] = None
+    link_reason: Optional[str] = None
 
 class Visit(BaseModel):
     id: int
@@ -912,6 +918,9 @@ class Visit(BaseModel):
     payment_date: Optional[str]
     discount: Optional[float]
     notes_billing: Optional[str]
+    # Linked visits feature
+    parent_visit_id: Optional[int] = None
+    link_reason: Optional[str] = None
 
 # Additional models used in routes below
 class PatientWithVisits(BaseModel):
@@ -4138,6 +4147,24 @@ async def create_visit(
                     detail="Selected PDF template is not active"
                 )
         
+        # Validate parent_visit_id if provided (for linked/follow-up visits)
+        parent_visit_context = None
+        if visit.parent_visit_id:
+            parent_visit = await db.get_visit_by_id(visit.parent_visit_id, current_doctor["firebase_uid"])
+            if not parent_visit:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Parent visit not found or does not belong to this doctor"
+                )
+            # Verify the parent visit belongs to the same patient
+            if parent_visit["patient_id"] != patient_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Parent visit must belong to the same patient"
+                )
+            parent_visit_context = parent_visit
+            print(f"Creating linked visit: New visit linked to parent visit {visit.parent_visit_id}")
+        
         # Prepare visit data for Supabase
         visit_data = {
             "patient_id": patient_id,
@@ -4149,6 +4176,11 @@ async def create_visit(
             "created_at": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
+        
+        # Add parent visit link if provided
+        if visit.parent_visit_id:
+            visit_data["parent_visit_id"] = visit.parent_visit_id
+            visit_data["link_reason"] = visit.link_reason or "Follow-up visit"
         
         # Add optional fields
         optional_fields = ["visit_time", "symptoms", "clinical_examination", "diagnosis", 
@@ -4306,6 +4338,16 @@ async def create_visit(
                 "lab_requests_created": len(lab_requests_created),
                 "lab_requests": lab_requests_created
             }
+            
+            # Add linked visit info to response
+            if visit.parent_visit_id and parent_visit_context:
+                response_data["linked_visit"] = {
+                    "parent_visit_id": visit.parent_visit_id,
+                    "link_reason": visit.link_reason or "Follow-up visit",
+                    "parent_visit_date": parent_visit_context.get("visit_date"),
+                    "parent_diagnosis": parent_visit_context.get("diagnosis"),
+                    "parent_chief_complaint": parent_visit_context.get("chief_complaint")
+                }
 
             try:
                 print(f"🔍 DEBUG: About to sync pharmacy prescription for visit {visit_id}")
@@ -4370,6 +4412,336 @@ async def get_visit_details(visit_id: int, current_doctor = Depends(get_current_
         )
     
     return Visit(**visit)
+
+@app.get("/visits/{visit_id}/linked-visits", response_model=dict)
+async def get_linked_visits(visit_id: int, current_doctor = Depends(get_current_doctor)):
+    """
+    Get all visits linked to a specific visit (parent and children).
+    This provides the complete context chain for a visit.
+    """
+    try:
+        # Check if visit exists and belongs to current doctor
+        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        # Get parent visit if exists
+        parent_visit = None
+        if visit.get("parent_visit_id"):
+            parent_visit = await db.get_visit_by_id(visit["parent_visit_id"], current_doctor["firebase_uid"])
+        
+        # Get child visits (follow-ups that link to this visit)
+        child_visits = await db.get_child_visits(visit_id, current_doctor["firebase_uid"])
+        
+        # Get reports for the current visit
+        current_reports = await db.get_reports_by_visit_id(visit_id, current_doctor["firebase_uid"])
+        
+        # Get reports for parent visit if exists
+        parent_reports = []
+        if parent_visit:
+            parent_reports = await db.get_reports_by_visit_id(parent_visit["id"], current_doctor["firebase_uid"])
+        
+        # Build the response
+        response = {
+            "current_visit": {
+                "id": visit["id"],
+                "visit_date": visit["visit_date"],
+                "visit_type": visit["visit_type"],
+                "chief_complaint": visit["chief_complaint"],
+                "diagnosis": visit.get("diagnosis"),
+                "treatment_plan": visit.get("treatment_plan"),
+                "medications": visit.get("medications"),
+                "link_reason": visit.get("link_reason"),
+                "reports_count": len(current_reports)
+            },
+            "parent_visit": None,
+            "child_visits": [],
+            "visit_chain_summary": {
+                "has_parent": parent_visit is not None,
+                "child_count": len(child_visits) if child_visits else 0,
+                "total_reports_in_chain": len(current_reports) + len(parent_reports)
+            }
+        }
+        
+        if parent_visit:
+            response["parent_visit"] = {
+                "id": parent_visit["id"],
+                "visit_date": parent_visit["visit_date"],
+                "visit_type": parent_visit["visit_type"],
+                "chief_complaint": parent_visit["chief_complaint"],
+                "diagnosis": parent_visit.get("diagnosis"),
+                "treatment_plan": parent_visit.get("treatment_plan"),
+                "medications": parent_visit.get("medications"),
+                "tests_recommended": parent_visit.get("tests_recommended"),
+                "reports_count": len(parent_reports),
+                "reports": [{
+                    "id": r["id"],
+                    "file_name": r["file_name"],
+                    "test_type": r.get("test_type"),
+                    "uploaded_at": r["uploaded_at"]
+                } for r in parent_reports[:5]]  # Limit to 5 most recent
+            }
+        
+        if child_visits:
+            response["child_visits"] = [{
+                "id": cv["id"],
+                "visit_date": cv["visit_date"],
+                "visit_type": cv["visit_type"],
+                "chief_complaint": cv["chief_complaint"],
+                "diagnosis": cv.get("diagnosis"),
+                "link_reason": cv.get("link_reason"),
+                "created_at": cv.get("created_at")
+            } for cv in child_visits]
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting linked visits: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get linked visits: {str(e)}"
+        )
+
+class LinkVisitRequest(BaseModel):
+    parent_visit_id: int
+    link_reason: Optional[str] = None
+
+@app.post("/visits/{visit_id}/link-to-visit", response_model=dict)
+async def link_visit_to_parent(
+    visit_id: int,
+    link_request: LinkVisitRequest,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Link an existing visit to a parent visit.
+    This allows retroactively linking visits as follow-ups.
+    """
+    try:
+        # Check if visit exists and belongs to current doctor
+        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        # Check if parent visit exists
+        parent_visit = await db.get_visit_by_id(link_request.parent_visit_id, current_doctor["firebase_uid"])
+        if not parent_visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Parent visit not found"
+            )
+        
+        # Verify visits belong to the same patient
+        if visit["patient_id"] != parent_visit["patient_id"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot link visits for different patients"
+            )
+        
+        # Prevent circular linking - check if parent_visit already links back to this visit
+        chain_check = parent_visit
+        depth = 0
+        while chain_check.get("parent_visit_id") and depth < 10:
+            if chain_check["parent_visit_id"] == visit_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot create circular visit link"
+                )
+            chain_check = await db.get_visit_by_id(chain_check["parent_visit_id"], current_doctor["firebase_uid"])
+            if not chain_check:
+                break
+            depth += 1
+        
+        # Link the visit
+        success = await db.link_visit_to_parent(
+            visit_id=visit_id,
+            parent_visit_id=link_request.parent_visit_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"],
+            link_reason=link_request.link_reason
+        )
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to link visit"
+            )
+        
+        return {
+            "message": "Visit linked successfully",
+            "visit_id": visit_id,
+            "parent_visit_id": link_request.parent_visit_id,
+            "link_reason": link_request.link_reason
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error linking visit: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to link visit: {str(e)}"
+        )
+
+@app.delete("/visits/{visit_id}/unlink", response_model=dict)
+async def unlink_visit(visit_id: int, current_doctor = Depends(get_current_doctor)):
+    """
+    Remove the link between a visit and its parent.
+    """
+    try:
+        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        if not visit.get("parent_visit_id"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Visit is not linked to any parent"
+            )
+        
+        # Update visit to remove parent link
+        success = await db.update_visit(
+            visit_id, 
+            current_doctor["firebase_uid"], 
+            {"parent_visit_id": None, "link_reason": None}
+        )
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to unlink visit"
+            )
+        
+        return {"message": "Visit unlinked successfully", "visit_id": visit_id}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error unlinking visit: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to unlink visit: {str(e)}"
+        )
+
+@app.get("/visits/{visit_id}/context-for-analysis", response_model=dict)
+async def get_visit_context_for_analysis(visit_id: int, current_doctor = Depends(get_current_doctor)):
+    """
+    Get comprehensive context for AI analysis including linked visit history.
+    This is used when analyzing reports to provide full context to the AI.
+    """
+    try:
+        # Check if visit exists and belongs to current doctor
+        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        # Get patient info
+        patient = await db.get_patient_by_id(visit["patient_id"], current_doctor["firebase_uid"])
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        # Build the visit chain (parent visits)
+        visit_chain = []
+        current_visit = visit
+        chain_depth = 0
+        max_depth = 5  # Limit chain depth to prevent infinite loops
+        
+        while current_visit.get("parent_visit_id") and chain_depth < max_depth:
+            parent = await db.get_visit_by_id(current_visit["parent_visit_id"], current_doctor["firebase_uid"])
+            if parent:
+                # Get reports for this parent visit
+                parent_reports = await db.get_reports_by_visit_id(parent["id"], current_doctor["firebase_uid"])
+                # Get AI analyses for parent reports
+                parent_analyses = await db.get_ai_analyses_by_visit_id(parent["id"], current_doctor["firebase_uid"])
+                
+                visit_chain.append({
+                    "visit_id": parent["id"],
+                    "visit_date": parent["visit_date"],
+                    "visit_type": parent["visit_type"],
+                    "chief_complaint": parent["chief_complaint"],
+                    "symptoms": parent.get("symptoms"),
+                    "diagnosis": parent.get("diagnosis"),
+                    "treatment_plan": parent.get("treatment_plan"),
+                    "medications": parent.get("medications"),
+                    "tests_recommended": parent.get("tests_recommended"),
+                    "clinical_examination": parent.get("clinical_examination"),
+                    "reports": [{
+                        "id": r["id"],
+                        "file_name": r["file_name"],
+                        "test_type": r.get("test_type"),
+                        "uploaded_at": r["uploaded_at"]
+                    } for r in parent_reports],
+                    "ai_analyses_summary": [{
+                        "report_id": a.get("report_id"),
+                        "document_summary": a.get("document_summary", "")[:200],
+                        "key_findings": a.get("key_findings", [])
+                    } for a in parent_analyses[:3]]  # Limit to 3 most recent
+                })
+                current_visit = parent
+                chain_depth += 1
+            else:
+                break
+        
+        # Reverse to get chronological order (oldest first)
+        visit_chain.reverse()
+        
+        return {
+            "current_visit": {
+                "id": visit["id"],
+                "visit_date": visit["visit_date"],
+                "visit_type": visit["visit_type"],
+                "chief_complaint": visit["chief_complaint"],
+                "symptoms": visit.get("symptoms"),
+                "diagnosis": visit.get("diagnosis"),
+                "treatment_plan": visit.get("treatment_plan"),
+                "medications": visit.get("medications"),
+                "tests_recommended": visit.get("tests_recommended"),
+                "clinical_examination": visit.get("clinical_examination"),
+                "vitals": visit.get("vitals"),
+                "link_reason": visit.get("link_reason")
+            },
+            "patient": {
+                "id": patient["id"],
+                "name": f"{patient['first_name']} {patient['last_name']}",
+                "age": patient.get("date_of_birth"),
+                "gender": patient.get("gender"),
+                "blood_group": patient.get("blood_group"),
+                "allergies": patient.get("allergies"),
+                "medical_history": patient.get("medical_history")
+            },
+            "visit_history_chain": visit_chain,
+            "context_summary": {
+                "is_follow_up": visit.get("parent_visit_id") is not None,
+                "chain_length": len(visit_chain),
+                "total_previous_visits": len(visit_chain),
+                "has_previous_reports": any(len(v.get("reports", [])) > 0 for v in visit_chain),
+                "has_previous_analyses": any(len(v.get("ai_analyses_summary", [])) > 0 for v in visit_chain)
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting visit context: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get visit context: {str(e)}"
+        )
 
 @app.put("/visits/{visit_id}", response_model=dict)
 async def update_visit(

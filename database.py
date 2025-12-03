@@ -310,6 +310,72 @@ class DatabaseManager:
             print(f"Traceback: {traceback.format_exc()}")
             return False
 
+    async def get_child_visits(self, parent_visit_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
+        """Get all child visits (follow-ups) for a parent visit"""
+        try:
+            print(f"Fetching child visits for parent visit: {parent_visit_id}")
+            
+            # Get all visits that have this visit as their parent
+            response = await self.supabase.table("visits").select("*").eq("parent_visit_id", parent_visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("visit_date", desc=True).execute()
+            
+            return response.data if response.data else []
+        except Exception as e:
+            print(f"Error fetching child visits: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return []
+
+    async def get_visit_chain(self, visit_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
+        """Get the full visit chain from root to current visit"""
+        try:
+            print(f"Building visit chain for visit: {visit_id}")
+            
+            chain = []
+            current_id = visit_id
+            
+            # Walk up the chain to find all ancestors
+            while current_id:
+                visit = await self.get_visit_by_id(current_id, doctor_firebase_uid)
+                if not visit:
+                    break
+                chain.insert(0, visit)  # Insert at beginning to maintain order (root first)
+                current_id = visit.get("parent_visit_id")
+            
+            return chain
+        except Exception as e:
+            print(f"Error building visit chain: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return []
+
+    async def link_visit_to_parent(self, visit_id: int, parent_visit_id: int, doctor_firebase_uid: str, link_reason: Optional[str] = None) -> bool:
+        """Link an existing visit to a parent visit"""
+        try:
+            print(f"Linking visit {visit_id} to parent {parent_visit_id}")
+            
+            # Verify both visits exist and belong to the doctor
+            visit = await self.get_visit_by_id(visit_id, doctor_firebase_uid)
+            parent = await self.get_visit_by_id(parent_visit_id, doctor_firebase_uid)
+            
+            if not visit or not parent:
+                print("Visit or parent visit not found")
+                return False
+            
+            # Verify they belong to the same patient
+            if visit.get("patient_id") != parent.get("patient_id"):
+                print("Visits belong to different patients")
+                return False
+            
+            # Update the visit with the parent reference
+            update_data = {"parent_visit_id": parent_visit_id}
+            if link_reason:
+                update_data["link_reason"] = link_reason
+            
+            response = await self.supabase.table("visits").update(update_data).eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
+            return bool(response.data)
+        except Exception as e:
+            print(f"Error linking visit to parent: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return False
+
     async def delete_visit(self, visit_id: int, doctor_firebase_uid: str) -> bool:
         """Delete visit record and all associated reports, AI analyses, and patient history analyses"""
         try:
