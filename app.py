@@ -4460,16 +4460,101 @@ async def get_patient_visits(patient_id: int, current_doctor = Depends(get_curre
     visits = await db.get_visits_by_patient_id(patient_id, current_doctor["firebase_uid"])
     return [Visit(**visit) for visit in visits]
 
-@app.get("/visits/{visit_id}", response_model=Visit)
+@app.get("/visits/{visit_id}", response_model=dict)
 async def get_visit_details(visit_id: int, current_doctor = Depends(get_current_doctor)):
-    visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
-    if not visit:
+    """
+    Get visit details with remote prescriptions sent from this visit.
+    Includes all prescription PDFs so they can be displayed in the visit screen.
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        # Get visit
+        visit = await db.get_visit_by_id(visit_id, doctor_uid)
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        # Get handwritten notes (prescriptions) for this visit in parallel
+        notes = await db.get_handwritten_visit_notes_by_visit_id(visit_id, doctor_uid)
+        
+        # Extract remote prescriptions (notes that were sent or are remote type)
+        remote_prescriptions = [
+            {
+                "id": n["id"],
+                "file_url": n.get("handwritten_pdf_url"),
+                "file_name": n.get("handwritten_pdf_filename"),
+                "prescription_type": n.get("prescription_type", "general"),
+                "note_type": n.get("note_type"),
+                "sent_via_whatsapp": n.get("sent_via_whatsapp", False),
+                "whatsapp_sent_at": n.get("whatsapp_sent_at"),
+                "created_at": n.get("created_at"),
+                "resend_endpoint": f"/handwritten-notes/{n['id']}/resend-whatsapp"
+            }
+            for n in (notes or [])
+        ]
+        
+        # Sort by created_at descending
+        remote_prescriptions.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        
+        # Build visit response with all fields
+        visit_data = {
+            "id": visit["id"],
+            "patient_id": visit["patient_id"],
+            "doctor_firebase_uid": visit["doctor_firebase_uid"],
+            "visit_date": visit["visit_date"],
+            "visit_time": visit.get("visit_time"),
+            "visit_type": visit["visit_type"],
+            "chief_complaint": visit["chief_complaint"],
+            "symptoms": visit.get("symptoms"),
+            "vitals": visit.get("vitals"),
+            "clinical_examination": visit.get("clinical_examination"),
+            "diagnosis": visit.get("diagnosis"),
+            "treatment_plan": visit.get("treatment_plan"),
+            "medications": visit.get("medications"),
+            "tests_recommended": visit.get("tests_recommended"),
+            "follow_up_date": visit.get("follow_up_date"),
+            "notes": visit.get("notes"),
+            "created_at": visit.get("created_at"),
+            "updated_at": visit.get("updated_at"),
+            "note_input_type": visit.get("note_input_type", "typed"),
+            "selected_template_id": visit.get("selected_template_id"),
+            "handwritten_pdf_url": visit.get("handwritten_pdf_url"),
+            "handwritten_pdf_filename": visit.get("handwritten_pdf_filename"),
+            # Billing fields
+            "consultation_fee": visit.get("consultation_fee"),
+            "additional_charges": visit.get("additional_charges"),
+            "total_amount": visit.get("total_amount"),
+            "payment_status": visit.get("payment_status"),
+            "payment_method": visit.get("payment_method"),
+            "payment_date": visit.get("payment_date"),
+            "discount": visit.get("discount"),
+            "notes_billing": visit.get("notes_billing"),
+            # Linked visits
+            "parent_visit_id": visit.get("parent_visit_id"),
+            "link_reason": visit.get("link_reason"),
+            # Prescription status
+            "prescription_status": visit.get("prescription_status"),
+            "prescription_resolution_type": visit.get("prescription_resolution_type"),
+            "prescription_resolution_note": visit.get("prescription_resolution_note"),
+            # Remote prescriptions sent from this visit
+            "remote_prescriptions": remote_prescriptions,
+            "remote_prescriptions_count": len(remote_prescriptions),
+            "has_whatsapp_prescription": any(rp["sent_via_whatsapp"] for rp in remote_prescriptions)
+        }
+        
+        return visit_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting visit details: {e}")
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Visit not found"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get visit details: {str(e)}"
         )
-    
-    return Visit(**visit)
 
 @app.get("/visits/{visit_id}/linked-visits", response_model=dict)
 async def get_linked_visits(visit_id: int, current_doctor = Depends(get_current_doctor)):
@@ -5965,13 +6050,17 @@ async def send_remote_prescription(
 ):
     """
     Upload a prescription PDF and send it directly to the patient via WhatsApp.
-    This is for EXISTING visits where the doctor wants to send a prescription
-    after reviewing uploaded reports - WITHOUT requiring a new visit.
+    
+    USE CASES:
+    1. After reviewing uploaded lab reports (typical remote prescription flow)
+    2. Directly from any visit - doctor writes prescription and sends it
+    3. Follow-up prescriptions without requiring new lab reports
+    4. Any situation where doctor wants to send a prescription remotely
     
     Form data:
     - file: PDF file (required)
     - custom_message: Custom WhatsApp message (optional)
-    - prescription_type: Type of prescription - "medication", "follow_up", "report_review" (optional)
+    - prescription_type: Type of prescription - "medication", "follow_up", "report_review", "general" (optional)
     - send_whatsapp: Whether to send via WhatsApp, default true (optional)
     """
     try:
@@ -6126,6 +6215,118 @@ async def send_remote_prescription(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to send remote prescription: {str(e)}"
+        )
+
+class ResendPrescriptionRequest(BaseModel):
+    custom_message: Optional[str] = None
+
+@app.post("/handwritten-notes/{note_id}/resend-whatsapp", response_model=dict)
+async def resend_prescription_via_whatsapp(
+    note_id: int,
+    request_data: ResendPrescriptionRequest = Body(default=ResendPrescriptionRequest()),
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Resend an existing prescription/handwritten note via WhatsApp.
+    Use this when:
+    - The original WhatsApp message wasn't sent
+    - Patient didn't receive the first message
+    - Doctor wants to send the prescription again
+    """
+    try:
+        # Get the handwritten note
+        note = await db.get_handwritten_visit_note_by_id(note_id, current_doctor["firebase_uid"])
+        if not note:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Prescription note not found"
+            )
+        
+        # Get visit and patient
+        visit = await db.get_visit_by_id(note["visit_id"], current_doctor["firebase_uid"])
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        patient = await db.get_patient_by_id(note["patient_id"], current_doctor["firebase_uid"])
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        if not patient.get("phone"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Patient phone number not available"
+            )
+        
+        if not note.get("handwritten_pdf_url"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No PDF file found for this prescription"
+            )
+        
+        # Build WhatsApp message
+        patient_name = f"{patient['first_name']} {patient['last_name']}"
+        doctor_name = f"Dr. {current_doctor['first_name']} {current_doctor['last_name']}"
+        
+        if request_data.custom_message:
+            message = request_data.custom_message
+        else:
+            message = f"Dear {patient_name},\n\nHere is your prescription from {doctor_name}.\n\nPlease follow the instructions carefully. If you have any questions, feel free to contact us.\n\nThank you."
+        
+        # Send via WhatsApp
+        try:
+            whatsapp_result = await whatsapp_service.send_pdf_document(
+                to_phone=patient["phone"],
+                document_url=note["handwritten_pdf_url"],
+                filename=note.get("handwritten_pdf_filename", "prescription.pdf"),
+                caption=message
+            )
+            
+            if whatsapp_result.get("success"):
+                # Update note record
+                await db.update_handwritten_visit_note(
+                    note_id,
+                    current_doctor["firebase_uid"],
+                    {
+                        "sent_via_whatsapp": True,
+                        "whatsapp_message_id": whatsapp_result.get("message_id"),
+                        "whatsapp_sent_at": datetime.now(timezone.utc).isoformat()
+                    }
+                )
+                
+                return {
+                    "message": "Prescription sent successfully via WhatsApp",
+                    "note_id": note_id,
+                    "patient_phone": patient["phone"],
+                    "whatsapp_message_id": whatsapp_result.get("message_id"),
+                    "sent_at": datetime.now(timezone.utc).isoformat()
+                }
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"WhatsApp sending failed: {whatsapp_result.get('error', 'Unknown error')}"
+                )
+                
+        except HTTPException:
+            raise
+        except Exception as wa_error:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"WhatsApp error: {str(wa_error)}"
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error resending prescription: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to resend prescription: {str(e)}"
         )
 
 @app.get("/visits/{visit_id}/handwriting-interface", response_class=HTMLResponse)
@@ -6306,7 +6507,7 @@ async def send_whatsapp_report_link(
             )
         
         # Generate the full upload URL
-        base_url = os.getenv("PUBLIC_BASE_URL", "https://backend-app-wwld.onrender.com")
+        base_url = os.getenv("PUBLIC_BASE_URL", "")
         upload_url = f"{base_url.rstrip('/')}/upload-reports/{upload_token}"
         
         # Prepare response data
@@ -8452,6 +8653,138 @@ async def update_follow_up_date(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update follow-up date"
+        )
+
+class AppointmentReminderRequest(BaseModel):
+    custom_message: Optional[str] = None
+
+@app.post("/visits/{visit_id}/send-appointment-reminder", response_model=dict)
+async def send_appointment_reminder(
+    visit_id: int,
+    request_data: AppointmentReminderRequest = Body(default=AppointmentReminderRequest()),
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Send appointment reminder to patient via WhatsApp.
+    Used from calendar view to remind patients of upcoming appointments.
+    """
+    try:
+        # Get visit details
+        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        # Check if visit has a follow-up date
+        follow_up_date = visit.get("follow_up_date")
+        if not follow_up_date:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This visit does not have a follow-up appointment scheduled"
+            )
+        
+        # Get patient details
+        patient = await db.get_patient_by_id(visit["patient_id"], current_doctor["firebase_uid"])
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        # Check if patient has phone number
+        if not patient.get("phone"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Patient does not have a phone number registered"
+            )
+        
+        # Format the appointment date nicely
+        try:
+            from datetime import datetime
+            appointment_date = datetime.strptime(follow_up_date, "%Y-%m-%d")
+            formatted_date = appointment_date.strftime("%d %B %Y")  # e.g., "07 December 2025"
+            day_name = appointment_date.strftime("%A")  # e.g., "Sunday"
+        except:
+            formatted_date = follow_up_date
+            day_name = ""
+        
+        # Get follow-up time if available
+        follow_up_time = visit.get("follow_up_time", "")
+        time_str = f" at {follow_up_time}" if follow_up_time else ""
+        
+        # Build the reminder message
+        patient_name = f"{patient['first_name']} {patient['last_name']}"
+        doctor_name = f"Dr. {current_doctor['first_name']} {current_doctor['last_name']}"
+        hospital_name = current_doctor.get("hospital_name", "our clinic")
+        
+        # Custom message from doctor (if provided)
+        doctor_note = ""
+        if request_data.custom_message:
+            doctor_note = f"""
+
+💬 *Message from {doctor_name}:*
+"{request_data.custom_message}"
+"""
+        
+        message = f"""Dear {patient_name},
+
+This is a friendly reminder about your upcoming appointment.
+
+📅 *Appointment Details:*
+• Date: {day_name}, {formatted_date}{time_str}
+• Doctor: {doctor_name}
+• Location: {hospital_name}{doctor_note}
+
+Please arrive 10-15 minutes before your scheduled time. If you need to reschedule, please contact us in advance.
+
+Thank you for choosing us for your healthcare needs.
+
+Best regards,
+{hospital_name}"""
+        
+        # Send WhatsApp message
+        try:
+            whatsapp_result = await whatsapp_service.send_message(
+                to_phone=patient["phone"],
+                message=message
+            )
+            
+            if whatsapp_result.get("success"):
+                return {
+                    "message": "Appointment reminder sent successfully",
+                    "visit_id": visit_id,
+                    "patient_name": patient_name,
+                    "patient_phone": patient["phone"],
+                    "appointment_date": follow_up_date,
+                    "appointment_time": follow_up_time,
+                    "whatsapp_message_id": whatsapp_result.get("message_id"),
+                    "sent_at": datetime.now(timezone.utc).isoformat()
+                }
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to send WhatsApp message: {whatsapp_result.get('error', 'Unknown error')}"
+                )
+                
+        except HTTPException:
+            raise
+        except Exception as wa_error:
+            print(f"WhatsApp error: {wa_error}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"WhatsApp service error: {str(wa_error)}"
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error sending appointment reminder: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to send appointment reminder: {str(e)}"
         )
 
 @app.put("/visits/{visit_id}/billing", response_model=dict)

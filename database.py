@@ -164,8 +164,8 @@ class DatabaseManager:
 
     async def delete_patient(self, patient_id: int, doctor_firebase_uid: str) -> bool:
         try:
-            # First, verify the doctor owns the patient
-            patient_response = await self.supabase.table("patients").select("id").eq("id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
+            # First, verify the doctor owns the patient (column is created_by_doctor, not doctor_firebase_uid)
+            patient_response = await self.supabase.table("patients").select("id").eq("id", patient_id).eq("created_by_doctor", doctor_firebase_uid).execute()
             if not patient_response.data:
                 print(f"Unauthorized or patient not found: patient_id={patient_id}, doctor_uid={doctor_firebase_uid}")
                 return False
@@ -175,6 +175,9 @@ class DatabaseManager:
             
             if response.data:
                 print(f"Patient with id {patient_id} deleted successfully.")
+                # Invalidate cache
+                if self.cache:
+                    await self.cache.delete(f"patient:{patient_id}:{doctor_firebase_uid}")
                 return True
             else:
                 print(f"Failed to delete patient with id {patient_id}.")
