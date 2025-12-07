@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, Request, File, Form, UploadFile
+from fastapi import FastAPI, HTTPException, Depends, status, Request, File, Form, UploadFile, Body
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -222,6 +222,7 @@ class DoctorProfile(BaseModel):
     pathology_lab_phone: Optional[str] = None
     radiology_lab_name: Optional[str] = None
     radiology_lab_phone: Optional[str] = None
+    ai_enabled: bool = True  # AI analysis toggle
     created_at: str
     updated_at: str
 
@@ -236,6 +237,7 @@ class DoctorUpdate(BaseModel):
     pathology_lab_name: Optional[str] = None
     radiology_lab_phone: Optional[str] = None
     radiology_lab_name: Optional[str] = None
+    ai_enabled: Optional[bool] = None  # AI analysis toggle
 
 # Frontdesk Models
 class FrontdeskRegister(BaseModel):
@@ -1601,6 +1603,7 @@ async def get_doctor_profile(current_doctor = Depends(get_current_doctor)):
         pathology_lab_phone=current_doctor.get("pathology_lab_phone"),
         radiology_lab_name=current_doctor.get("radiology_lab_name"),
         radiology_lab_phone=current_doctor.get("radiology_lab_phone"),
+        ai_enabled=current_doctor.get("ai_enabled", True),
         created_at=current_doctor["created_at"],
         updated_at=current_doctor["updated_at"]
     )
@@ -1632,6 +1635,52 @@ async def update_doctor_profile(
             detail="Failed to update profile"
         )
 
+@app.post("/profile/toggle-ai", response_model=dict)
+async def toggle_ai_setting(
+    current_doctor = Depends(get_current_doctor)
+):
+    """Toggle AI analysis on/off for the doctor"""
+    try:
+        # Get current AI setting (default to True if not set)
+        current_setting = current_doctor.get("ai_enabled", True)
+        new_setting = not current_setting
+        
+        # Update the setting
+        update_data = {
+            "ai_enabled": new_setting,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        success = await db.update_doctor(current_doctor["firebase_uid"], update_data)
+        
+        if success:
+            return {
+                "message": f"AI analysis {'enabled' if new_setting else 'disabled'}",
+                "ai_enabled": new_setting
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update AI setting"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error toggling AI setting: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to toggle AI setting: {str(e)}"
+        )
+
+@app.get("/profile/ai-status", response_model=dict)
+async def get_ai_status(current_doctor = Depends(get_current_doctor)):
+    """Get current AI analysis status for the doctor"""
+    ai_enabled = current_doctor.get("ai_enabled", True)
+    return {
+        "ai_enabled": ai_enabled,
+        "message": "AI analysis is enabled" if ai_enabled else "AI analysis is disabled"
+    }
+
 # Helper functions for password hashing
 def hash_password(password: str) -> str:
     """Hash a password using SHA-256 with salt"""
@@ -1641,6 +1690,15 @@ def hash_password(password: str) -> str:
 def verify_password(password: str, hashed_password: str) -> bool:
     """Verify a password against its hash"""
     return hash_password(password) == hashed_password
+
+
+def check_ai_enabled(doctor: dict) -> None:
+    """Check if AI is enabled for the doctor, raise exception if not"""
+    if not doctor.get("ai_enabled", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="AI analysis is disabled for your account. Enable it in Settings to use AI features."
+        )
 
 
 def generate_invoice_number() -> str:
@@ -4420,29 +4478,29 @@ async def get_linked_visits(visit_id: int, current_doctor = Depends(get_current_
     This provides the complete context chain for a visit.
     """
     try:
-        # Check if visit exists and belongs to current doctor
-        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        # Run initial queries in parallel
+        visit_task = db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        child_visits_task = db.get_child_visits(visit_id, current_doctor["firebase_uid"])
+        current_reports_task = db.get_reports_by_visit_id(visit_id, current_doctor["firebase_uid"])
+        
+        visit, child_visits, current_reports = await asyncio.gather(
+            visit_task, child_visits_task, current_reports_task
+        )
+        
         if not visit:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Visit not found"
             )
         
-        # Get parent visit if exists
+        # Get parent visit and its reports in parallel if parent exists
         parent_visit = None
-        if visit.get("parent_visit_id"):
-            parent_visit = await db.get_visit_by_id(visit["parent_visit_id"], current_doctor["firebase_uid"])
-        
-        # Get child visits (follow-ups that link to this visit)
-        child_visits = await db.get_child_visits(visit_id, current_doctor["firebase_uid"])
-        
-        # Get reports for the current visit
-        current_reports = await db.get_reports_by_visit_id(visit_id, current_doctor["firebase_uid"])
-        
-        # Get reports for parent visit if exists
         parent_reports = []
-        if parent_visit:
-            parent_reports = await db.get_reports_by_visit_id(parent_visit["id"], current_doctor["firebase_uid"])
+        if visit.get("parent_visit_id"):
+            parent_visit, parent_reports = await asyncio.gather(
+                db.get_visit_by_id(visit["parent_visit_id"], current_doctor["firebase_uid"]),
+                db.get_reports_by_visit_id(visit["parent_visit_id"], current_doctor["firebase_uid"])
+            )
         
         # Build the response
         response = {
@@ -4455,14 +4513,14 @@ async def get_linked_visits(visit_id: int, current_doctor = Depends(get_current_
                 "treatment_plan": visit.get("treatment_plan"),
                 "medications": visit.get("medications"),
                 "link_reason": visit.get("link_reason"),
-                "reports_count": len(current_reports)
+                "reports_count": len(current_reports) if current_reports else 0
             },
             "parent_visit": None,
             "child_visits": [],
             "visit_chain_summary": {
                 "has_parent": parent_visit is not None,
                 "child_count": len(child_visits) if child_visits else 0,
-                "total_reports_in_chain": len(current_reports) + len(parent_reports)
+                "total_reports_in_chain": (len(current_reports) if current_reports else 0) + (len(parent_reports) if parent_reports else 0)
             }
         }
         
@@ -4476,13 +4534,13 @@ async def get_linked_visits(visit_id: int, current_doctor = Depends(get_current_
                 "treatment_plan": parent_visit.get("treatment_plan"),
                 "medications": parent_visit.get("medications"),
                 "tests_recommended": parent_visit.get("tests_recommended"),
-                "reports_count": len(parent_reports),
+                "reports_count": len(parent_reports) if parent_reports else 0,
                 "reports": [{
                     "id": r["id"],
                     "file_name": r["file_name"],
                     "test_type": r.get("test_type"),
                     "uploaded_at": r["uploaded_at"]
-                } for r in parent_reports[:5]]  # Limit to 5 most recent
+                } for r in (parent_reports or [])[:5]]  # Limit to 5 most recent
             }
         
         if child_visits:
@@ -4948,7 +5006,7 @@ async def get_handwriting_template_for_visit(
     visit_id: int, 
     current_doctor = Depends(get_current_doctor)
 ):
-    """Get the PDF template for handwriting, if the visit was created with handwritten notes option"""
+    """Get the PDF template for handwriting for ANY visit (supports remote prescriptions)"""
     try:
         # Check if visit exists and belongs to current doctor
         visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
@@ -4958,26 +5016,20 @@ async def get_handwriting_template_for_visit(
                 detail="Visit not found"
             )
         
-        # Check if visit is set for handwritten notes
-        if visit.get("note_input_type") != "handwritten":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This visit was not created with handwritten notes option"
-            )
-        
-        # Get the selected template
+        # First try to get visit-specific template if set
+        template = None
         template_id = visit.get("selected_template_id")
-        if not template_id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="No template selected for this visit"
-            )
+        if template_id:
+            template = await db.get_pdf_template_by_id(template_id, current_doctor["firebase_uid"])
         
-        template = await db.get_pdf_template_by_id(template_id, current_doctor["firebase_uid"])
+        # If no visit-specific template, get doctor's default template
+        if not template:
+            template = await db.get_doctor_prescription_template(current_doctor["firebase_uid"])
+        
         if not template:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Template not found"
+                detail="No prescription template found. Please upload a template first."
             )
         
         # Get patient info for context
@@ -5000,7 +5052,8 @@ async def get_handwriting_template_for_visit(
                 "type": visit["visit_type"],
                 "chief_complaint": visit["chief_complaint"]
             },
-            "instructions": "Use a PDF editor or handwriting app to fill in the template, then upload the completed PDF using the upload endpoint."
+            "upload_endpoint": f"/visits/{visit_id}/send-remote-prescription",
+            "instructions": "Use a PDF editor or handwriting app to fill in the template, then upload the completed PDF."
         }
         
     except HTTPException:
@@ -5018,7 +5071,7 @@ async def upload_handwritten_pdf(
     request: Request,
     current_doctor = Depends(get_current_doctor)
 ):
-    """Upload the completed handwritten PDF for a visit"""
+    """Upload the completed handwritten PDF for a visit (works for any visit type)"""
     try:
         # Check if visit exists and belongs to current doctor
         visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
@@ -5026,13 +5079,6 @@ async def upload_handwritten_pdf(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Visit not found"
-            )
-        
-        # Check if visit is set for handwritten notes
-        if visit.get("note_input_type") != "handwritten":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="This visit was not created with handwritten notes option"
             )
         
         # Parse multipart form data
@@ -5145,86 +5191,19 @@ async def upload_handwritten_pdf(
             "file_name": unique_filename,
             "file_size": file_size,
             "template_used": template["template_name"] if template else "Unknown",
+            "note_id": created_note["id"] if created_note else None,
             "whatsapp_sent": False,
             "whatsapp_error": None,
-            "ai_analysis": None,
-            "ai_analysis_error": None
+            "ai_analysis_available": True,
+            "ai_analysis_endpoint": f"/handwritten-notes/{created_note['id']}/analyze" if created_note else None
         }
         
-        # Initialize patient variable for later use (AI analysis and WhatsApp)
+        # Initialize patient variable for WhatsApp
         patient = None
-        
-        # Trigger AI analysis for the handwritten prescription
-        # This uses Gemini 3 Pro's multimodal capabilities to read handwriting
-        try:
-            if ai_analysis_service:
-                print(f"🖊️ Starting AI analysis for handwritten prescription (visit {visit_id})")
-                
-                # Get patient information for context
-                patient = await db.get_patient_by_id(visit["patient_id"], current_doctor["firebase_uid"])
-                
-                if patient:
-                    # Perform AI analysis on the handwritten prescription
-                    ai_result = await ai_analysis_service.analyze_handwritten_prescription(
-                        file_content=file_content,
-                        file_name=unique_filename,
-                        patient_context=patient,
-                        visit_context=visit,
-                        doctor_context=current_doctor
-                    )
-                    
-                    if ai_result["success"]:
-                        print(f"✅ AI analysis completed for handwritten prescription (visit {visit_id})")
-                        print(f"   Confidence: {ai_result['analysis'].get('confidence_score', 0):.2f}")
-                        
-                        # Add AI analysis to response
-                        response_data["ai_analysis"] = {
-                            "success": True,
-                            "raw_analysis": ai_result["analysis"].get("raw_analysis", ""),
-                            "confidence_score": ai_result["analysis"].get("confidence_score", 0),
-                            "extracted_medications": ai_result["analysis"].get("extracted_medications", []),
-                            "extracted_diagnosis": ai_result["analysis"].get("extracted_diagnosis", ""),
-                            "legibility_score": ai_result["analysis"].get("legibility_score", 7),
-                            "structured_analysis": ai_result["analysis"].get("structured_analysis", {}),
-                            "model_used": ai_result.get("model_used", "gemini-3-pro-preview"),
-                            "processed_at": ai_result.get("processed_at")
-                        }
-                        
-                        # Update handwritten note record with AI analysis
-                        if created_note:
-                            try:
-                                await db.update_handwritten_visit_note(
-                                    created_note["id"],
-                                    current_doctor["firebase_uid"],
-                                    {
-                                        "ai_analysis_raw": ai_result["analysis"].get("raw_analysis", "")[:10000],  # Limit size
-                                        "ai_analysis_confidence": ai_result["analysis"].get("confidence_score", 0),
-                                        "ai_analysis_at": datetime.now(timezone.utc).isoformat(),
-                                        "updated_at": datetime.now(timezone.utc).isoformat()
-                                    }
-                                )
-                            except Exception as update_error:
-                                print(f"Warning: Could not save AI analysis to handwritten note: {update_error}")
-                    else:
-                        print(f"❌ AI analysis failed for handwritten prescription: {ai_result.get('error')}")
-                        response_data["ai_analysis_error"] = ai_result.get("error", "Analysis failed")
-                else:
-                    print("Warning: Patient not found for AI analysis context")
-                    response_data["ai_analysis_error"] = "Patient context not available"
-            else:
-                print("Warning: AI analysis service not available")
-                response_data["ai_analysis_error"] = "AI analysis service not initialized"
-                
-        except Exception as ai_error:
-            print(f"Error during AI analysis of handwritten prescription: {ai_error}")
-            response_data["ai_analysis_error"] = str(ai_error)
-            # Don't fail the upload if AI analysis fails
         
         # Send WhatsApp message if requested
         if send_whatsapp:
-            # Use patient from AI analysis context if available, otherwise fetch
-            if not patient:
-                patient = await db.get_patient_by_id(visit["patient_id"], current_doctor["firebase_uid"])
+            patient = await db.get_patient_by_id(visit["patient_id"], current_doctor["firebase_uid"])
             if patient and patient.get("phone"):
                 try:
                     whatsapp_result = await whatsapp_service.send_handwritten_visit_note(
@@ -5466,6 +5445,9 @@ async def analyze_handwritten_note(
     Can be used to re-analyze an existing handwritten note.
     """
     try:
+        # Check if AI is enabled for this doctor
+        check_ai_enabled(current_doctor)
+        
         # Get the handwritten note
         note = await db.get_handwritten_visit_note_by_id(note_id, current_doctor["firebase_uid"])
         if not note:
@@ -5517,15 +5499,36 @@ async def analyze_handwritten_note(
                 detail="Visit not found"
             )
         
+        # Get linked visit chain context for continuity of care
+        visit_chain_context = []
+        if visit.get("parent_visit_id"):
+            print(f"📎 This is a linked visit - fetching visit chain context for handwritten analysis")
+            try:
+                visit_chain_context = await db.get_visit_chain(note["visit_id"], current_doctor["firebase_uid"])
+                # Remove current visit from chain
+                visit_chain_context = [v for v in visit_chain_context if v["id"] != note["visit_id"]]
+                
+                # Enrich with previous handwritten notes if available
+                for chain_visit in visit_chain_context:
+                    chain_notes = await db.get_handwritten_visit_notes_by_visit_id(chain_visit["id"], current_doctor["firebase_uid"])
+                    if chain_notes:
+                        chain_visit["handwritten_summary"] = chain_notes[0].get("ai_analysis_raw", "")[:300] if chain_notes[0].get("ai_analysis_raw") else ""
+                
+                print(f"✅ Found {len(visit_chain_context)} linked previous visits for handwritten context")
+            except Exception as chain_error:
+                print(f"⚠️ Could not fetch visit chain context: {chain_error}")
+                visit_chain_context = []
+        
         print(f"🖊️ Starting AI analysis for handwritten note {note_id}")
         
-        # Perform AI analysis
+        # Perform AI analysis with visit chain context
         ai_result = await ai_analysis_service.analyze_handwritten_prescription(
             file_content=file_content,
             file_name=note["handwritten_pdf_filename"],
             patient_context=patient,
             visit_context=visit,
-            doctor_context=current_doctor
+            doctor_context=current_doctor,
+            visit_chain_context=visit_chain_context if visit_chain_context else None
         )
         
         if ai_result["success"]:
@@ -5628,6 +5631,501 @@ async def get_handwritten_note_analysis(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get handwritten note analysis: {str(e)}"
+        )
+
+# ============================================================================
+# REMOTE PRESCRIPTION FEATURE
+# Allows doctors to send prescriptions to patients without requiring a new visit
+# Useful when: patient uploads reports, doctor reviews them, and needs to send
+# a prescription remotely without the patient coming back physically
+# ============================================================================
+
+@app.get("/doctor/pending-prescriptions", response_model=dict)
+async def get_visits_pending_prescriptions(
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Get all visits that have reports uploaded but no prescription sent yet.
+    Helps doctors see which patients need remote prescriptions.
+    OPTIMIZED: Uses parallel queries to avoid N+1 problem.
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        # Get all visits for this doctor (already filtered to recent)
+        all_visits = await db.get_all_visits_by_doctor(doctor_uid)
+        
+        if not all_visits:
+            return {
+                "pending_count": 0,
+                "visits": [],
+                "message": "No pending prescriptions"
+            }
+        
+        # Filter out already resolved visits first (before any DB calls)
+        unresolved_visits = [v for v in all_visits if v.get("prescription_status") != "resolved"]
+        
+        if not unresolved_visits:
+            return {
+                "pending_count": 0,
+                "visits": [],
+                "message": "No pending prescriptions"
+            }
+        
+        # Collect unique patient IDs and visit IDs
+        visit_ids = [v["id"] for v in unresolved_visits]
+        patient_ids = list(set(v["patient_id"] for v in unresolved_visits))
+        
+        # PARALLEL: Fetch all reports, notes, and patients in parallel batches
+        reports_tasks = [db.get_reports_by_visit_id(vid, doctor_uid) for vid in visit_ids]
+        notes_tasks = [db.get_handwritten_visit_notes_by_visit_id(vid, doctor_uid) for vid in visit_ids]
+        patients_tasks = [db.get_patient_by_id(pid, doctor_uid) for pid in patient_ids]
+        
+        # Execute all queries in parallel
+        all_results = await asyncio.gather(
+            *reports_tasks,
+            *notes_tasks,
+            *patients_tasks,
+            return_exceptions=True
+        )
+        
+        # Split results
+        num_visits = len(visit_ids)
+        reports_results = all_results[:num_visits]
+        notes_results = all_results[num_visits:num_visits*2]
+        patients_results = all_results[num_visits*2:]
+        
+        # Build lookup maps
+        reports_by_visit = {visit_ids[i]: (r if not isinstance(r, Exception) else []) for i, r in enumerate(reports_results)}
+        notes_by_visit = {visit_ids[i]: (n if not isinstance(n, Exception) else []) for i, n in enumerate(notes_results)}
+        patients_by_id = {patient_ids[i]: (p if not isinstance(p, Exception) else None) for i, p in enumerate(patients_results)}
+        
+        pending_visits = []
+        
+        for visit in unresolved_visits:
+            reports = reports_by_visit.get(visit["id"], [])
+            notes = notes_by_visit.get(visit["id"], [])
+            
+            # Visit needs attention if has reports but no WhatsApp prescription sent
+            has_reports = reports and len(reports) > 0
+            has_prescription_sent = notes and any(n.get("sent_via_whatsapp") for n in notes)
+            
+            if has_reports and not has_prescription_sent:
+                patient = patients_by_id.get(visit["patient_id"])
+                
+                pending_visits.append({
+                    "visit_id": visit["id"],
+                    "visit_date": visit["visit_date"],
+                    "patient_name": f"{patient['first_name']} {patient['last_name']}" if patient else "Unknown",
+                    "patient_phone": patient.get("phone") if patient else None,
+                    "chief_complaint": visit["chief_complaint"],
+                    "reports_count": len(reports),
+                    "reports_uploaded_at": max(r["uploaded_at"] for r in reports) if reports else None,
+                    "prescription_needed": True,
+                    "remote_prescription_url": f"/visits/{visit['id']}/remote-prescription-context"
+                })
+        
+        # Sort by most recent report upload
+        pending_visits.sort(key=lambda x: x.get("reports_uploaded_at", ""), reverse=True)
+        
+        return {
+            "pending_count": len(pending_visits),
+            "visits": pending_visits,
+            "message": f"You have {len(pending_visits)} visit(s) with reports awaiting prescription"
+        }
+        
+    except Exception as e:
+        print(f"Error getting pending prescriptions: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get pending prescriptions: {str(e)}"
+        )
+
+class ResolveVisitRequest(BaseModel):
+    resolution_type: str = "in_person"  # "in_person", "no_prescription_needed", "referred", "patient_no_show", "other"
+    resolution_note: Optional[str] = None
+
+@app.post("/visits/{visit_id}/resolve-pending", response_model=dict)
+async def resolve_pending_visit(
+    visit_id: int,
+    resolution: ResolveVisitRequest = Body(default=ResolveVisitRequest()),
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Mark a visit as resolved without sending a remote prescription.
+    Use cases:
+    - Patient will come in person for prescription
+    - No prescription needed (reports are normal)
+    - Patient referred to specialist
+    - Patient didn't show up / cancelled
+    """
+    try:
+        # Get visit
+        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        valid_types = ["in_person", "no_prescription_needed", "referred", "patient_no_show", "other"]
+        if resolution.resolution_type not in valid_types:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid resolution_type. Must be one of: {', '.join(valid_types)}"
+            )
+        
+        # Update visit with resolution status
+        update_data = {
+            "prescription_status": "resolved",
+            "prescription_resolution_type": resolution.resolution_type,
+            "prescription_resolution_note": resolution.resolution_note,
+            "prescription_resolved_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        success = await db.update_visit(visit_id, current_doctor["firebase_uid"], update_data)
+        
+        if success:
+            return {
+                "message": "Visit marked as resolved",
+                "visit_id": visit_id,
+                "resolution_type": resolution.resolution_type,
+                "resolution_note": resolution.resolution_note
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update visit"
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error resolving pending visit: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to resolve pending visit: {str(e)}"
+        )
+
+@app.post("/visits/{visit_id}/reopen-pending", response_model=dict)
+async def reopen_pending_visit(
+    visit_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """Reopen a previously resolved visit (undo resolve)"""
+    try:
+        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        # Clear resolution status
+        update_data = {
+            "prescription_status": None,
+            "prescription_resolution_type": None,
+            "prescription_resolution_note": None,
+            "prescription_resolved_at": None,
+            "updated_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        success = await db.update_visit(visit_id, current_doctor["firebase_uid"], update_data)
+        
+        if success:
+            return {
+                "message": "Visit reopened",
+                "visit_id": visit_id
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to reopen visit"
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error reopening visit: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to reopen visit: {str(e)}"
+        )
+
+@app.get("/visits/{visit_id}/remote-prescription-context", response_model=dict)
+async def get_remote_prescription_context(
+    visit_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Get all context needed to create a remote prescription for an existing visit.
+    Returns: visit details, patient info, uploaded reports, AI analyses, and prescription template.
+    OPTIMIZED: Uses parallel queries for faster response.
+    
+    Use case: Patient visited, got tests ordered, uploaded reports. Doctor reviews and 
+    can now send prescription remotely without patient coming back.
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        # Get visit first (needed for patient_id)
+        visit = await db.get_visit_by_id(visit_id, doctor_uid)
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        # PARALLEL: Fetch all related data in parallel
+        patient_task = db.get_patient_by_id(visit["patient_id"], doctor_uid)
+        reports_task = db.get_reports_by_visit_id(visit_id, doctor_uid)
+        ai_analyses_task = db.get_ai_analyses_by_visit_id(visit_id, doctor_uid)
+        notes_task = db.get_handwritten_visit_notes_by_visit_id(visit_id, doctor_uid)
+        template_task = db.get_doctor_prescription_template(doctor_uid)
+        
+        patient, reports, ai_analyses, existing_notes, template = await asyncio.gather(
+            patient_task, reports_task, ai_analyses_task, notes_task, template_task
+        )
+        
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        return {
+            "visit": {
+                "id": visit["id"],
+                "date": visit["visit_date"],
+                "type": visit["visit_type"],
+                "chief_complaint": visit["chief_complaint"],
+                "symptoms": visit.get("symptoms"),
+                "diagnosis": visit.get("diagnosis"),
+                "treatment_plan": visit.get("treatment_plan"),
+                "medications": visit.get("medications"),
+                "tests_recommended": visit.get("tests_recommended"),
+                "clinical_examination": visit.get("clinical_examination")
+            },
+            "patient": {
+                "id": patient["id"],
+                "name": f"{patient['first_name']} {patient['last_name']}",
+                "phone": patient.get("phone"),
+                "whatsapp_available": bool(patient.get("phone")),
+                "age": patient.get("date_of_birth"),
+                "gender": patient.get("gender"),
+                "allergies": patient.get("allergies"),
+                "medical_history": patient.get("medical_history")
+            },
+            "reports": [{
+                "id": r["id"],
+                "file_name": r["file_name"],
+                "file_url": r["file_url"],
+                "test_type": r.get("test_type"),
+                "uploaded_at": r["uploaded_at"],
+                "has_ai_analysis": any(a["report_id"] == r["id"] for a in ai_analyses) if ai_analyses else False
+            } for r in (reports or [])],
+            "ai_analyses_summary": [{
+                "report_id": a["report_id"],
+                "key_findings": a.get("key_findings", []),
+                "document_summary": a.get("document_summary", "")[:300],
+                "clinical_correlation": a.get("clinical_correlation", "")[:300],
+                "critical_findings": a.get("critical_findings", "")[:200]
+            } for a in (ai_analyses or [])[:5]],
+            "existing_prescriptions": [{
+                "id": n["id"],
+                "file_url": n["handwritten_pdf_url"],
+                "created_at": n.get("created_at"),
+                "sent_via_whatsapp": n.get("sent_via_whatsapp", False)
+            } for n in (existing_notes or [])],
+            "prescription_template": {
+                "available": template is not None,
+                "id": template["id"] if template else None,
+                "name": template["template_name"] if template else None,
+                "file_url": template["file_url"] if template else None
+            },
+            "remote_prescription_endpoint": f"/visits/{visit_id}/send-remote-prescription",
+            "instructions": "Review the reports and AI analyses, then upload a handwritten prescription PDF to send to the patient via WhatsApp."
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting remote prescription context: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get remote prescription context: {str(e)}"
+        )
+
+@app.post("/visits/{visit_id}/send-remote-prescription", response_model=dict)
+async def send_remote_prescription(
+    visit_id: int,
+    request: Request,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Upload a prescription PDF and send it directly to the patient via WhatsApp.
+    This is for EXISTING visits where the doctor wants to send a prescription
+    after reviewing uploaded reports - WITHOUT requiring a new visit.
+    
+    Form data:
+    - file: PDF file (required)
+    - custom_message: Custom WhatsApp message (optional)
+    - prescription_type: Type of prescription - "medication", "follow_up", "report_review" (optional)
+    - send_whatsapp: Whether to send via WhatsApp, default true (optional)
+    """
+    try:
+        # Get visit
+        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        # Get patient for WhatsApp
+        patient = await db.get_patient_by_id(visit["patient_id"], current_doctor["firebase_uid"])
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        # Parse form data
+        form = await request.form()
+        files = form.getlist("file")
+        custom_message = form.get("custom_message", "")
+        prescription_type = form.get("prescription_type", "report_review")
+        send_whatsapp = form.get("send_whatsapp", "true").lower() == "true"
+        
+        if not files or len(files) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="PDF file is required"
+            )
+        
+        file = files[0]
+        
+        # Validate file type
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only PDF files are accepted"
+            )
+        
+        # Read file content
+        file_content = await file.read()
+        file_size = len(file_content)
+        
+        # Validate file size (max 10MB)
+        if file_size > 10 * 1024 * 1024:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="File size must be less than 10MB"
+            )
+        
+        # Generate unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        unique_filename = f"remote_prescription_{visit_id}_{timestamp}.pdf"
+        storage_path = f"{current_doctor['firebase_uid']}/prescriptions/{unique_filename}"
+        
+        # Upload to Supabase Storage
+        upload_response = await supabase.storage.from_("medical-reports").upload(
+            storage_path,
+            file_content,
+            {"content-type": "application/pdf"}
+        )
+        
+        # Get public URL
+        file_url = await supabase.storage.from_("medical-reports").get_public_url(storage_path)
+        
+        print(f"📤 Remote prescription uploaded: {file_url}")
+        
+        # Save as handwritten note record
+        note_data = {
+            "visit_id": visit_id,
+            "patient_id": visit["patient_id"],
+            "doctor_firebase_uid": current_doctor["firebase_uid"],
+            "handwritten_pdf_url": file_url,
+            "handwritten_pdf_filename": unique_filename,
+            "storage_path": storage_path,
+            "note_type": "remote_prescription",
+            "prescription_type": prescription_type,
+            "sent_via_whatsapp": False,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+        
+        created_note = await db.create_handwritten_visit_note(note_data)
+        
+        response_data = {
+            "message": "Remote prescription uploaded successfully",
+            "visit_id": visit_id,
+            "note_id": created_note["id"] if created_note else None,
+            "file_url": file_url,
+            "file_name": unique_filename,
+            "prescription_type": prescription_type,
+            "whatsapp_sent": False,
+            "whatsapp_error": None,
+            "ai_analysis_endpoint": f"/handwritten-notes/{created_note['id']}/analyze" if created_note else None
+        }
+        
+        # Send via WhatsApp if requested and patient has phone
+        if send_whatsapp:
+            if patient.get("phone"):
+                try:
+                    # Build message based on prescription type
+                    if prescription_type == "medication":
+                        default_message = "Based on your test results, here is your prescription. Please follow the instructions carefully."
+                    elif prescription_type == "follow_up":
+                        default_message = "Please review the attached follow-up instructions based on your recent reports."
+                    else:
+                        default_message = "I have reviewed your reports. Please find the prescription attached."
+                    
+                    whatsapp_message = custom_message if custom_message else default_message
+                    
+                    whatsapp_result = await whatsapp_service.send_handwritten_visit_note(
+                        patient_name=f"{patient['first_name']} {patient['last_name']}",
+                        doctor_name=f"Dr. {current_doctor['first_name']} {current_doctor['last_name']}",
+                        phone_number=patient["phone"],
+                        pdf_url=file_url,
+                        visit_date=visit["visit_date"],
+                        custom_message=whatsapp_message
+                    )
+                    
+                    if whatsapp_result["success"]:
+                        response_data["whatsapp_sent"] = True
+                        response_data["whatsapp_message_id"] = whatsapp_result.get("message_id")
+                        print(f"✅ Remote prescription sent via WhatsApp to {patient['phone']}")
+                        
+                        # Update note record
+                        if created_note:
+                            await db.update_handwritten_visit_note(
+                                created_note["id"],
+                                current_doctor["firebase_uid"],
+                                {
+                                    "sent_via_whatsapp": True,
+                                    "whatsapp_message_id": whatsapp_result.get("message_id"),
+                                    "whatsapp_sent_at": datetime.now(timezone.utc).isoformat()
+                                }
+                            )
+                    else:
+                        response_data["whatsapp_error"] = whatsapp_result.get("error", "Unknown error")
+                        
+                except Exception as wa_error:
+                    print(f"WhatsApp error: {wa_error}")
+                    response_data["whatsapp_error"] = str(wa_error)
+            else:
+                response_data["whatsapp_error"] = "Patient phone number not available"
+        
+        return response_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error sending remote prescription: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to send remote prescription: {str(e)}"
         )
 
 @app.get("/visits/{visit_id}/handwriting-interface", response_class=HTMLResponse)
@@ -8833,6 +9331,9 @@ async def analyze_report_with_ai(
 ):
     """Analyze a specific report using AI with patient and visit context"""
     try:
+        # Check if AI is enabled for this doctor
+        check_ai_enabled(current_doctor)
+        
         start_time = datetime.now()
         
         # Get the report
@@ -8862,6 +9363,30 @@ async def analyze_report_with_ai(
                 detail="Visit or patient information not found"
             )
         
+        # Get linked visit chain context for continuity of care
+        visit_chain_context = []
+        if visit.get("parent_visit_id"):
+            print(f"📎 This is a linked visit - fetching visit chain context for AI analysis")
+            try:
+                visit_chain_context = await db.get_visit_chain(report["visit_id"], current_doctor["firebase_uid"])
+                # Remove current visit from chain (we only want previous visits)
+                visit_chain_context = [v for v in visit_chain_context if v["id"] != report["visit_id"]]
+                
+                # Enrich chain with reports and AI analyses for context
+                for chain_visit in visit_chain_context:
+                    chain_visit_id = chain_visit["id"]
+                    # Get reports for this visit
+                    chain_reports = await db.get_reports_by_visit_id(chain_visit_id, current_doctor["firebase_uid"])
+                    chain_visit["reports"] = [{"file_name": r["file_name"], "test_type": r.get("test_type")} for r in (chain_reports or [])[:5]]
+                    # Get AI analyses summary
+                    chain_analyses = await db.get_ai_analyses_by_visit_id(chain_visit_id, current_doctor["firebase_uid"])
+                    chain_visit["ai_analyses_summary"] = [{"document_summary": a.get("document_summary", "")[:150]} for a in (chain_analyses or [])[:3]]
+                
+                print(f"✅ Found {len(visit_chain_context)} linked previous visits for context")
+            except Exception as chain_error:
+                print(f"⚠️ Could not fetch visit chain context: {chain_error}")
+                visit_chain_context = []
+        
         # Download the file from storage for analysis using async non-blocking download
         file_url = report["file_url"]
         try:
@@ -8884,14 +9409,15 @@ async def analyze_report_with_ai(
                 detail="Failed to download report file for analysis"
             )
         
-        # Perform AI analysis
+        # Perform AI analysis with visit chain context
         analysis_result = await ai_analysis_service.analyze_document(
             file_content=file_content,
             file_name=report["file_name"],
             file_type=report["file_type"],
             patient_context=patient,
             visit_context=visit,
-            doctor_context=current_doctor
+            doctor_context=current_doctor,
+            visit_chain_context=visit_chain_context if visit_chain_context else None
         )
         
         # Calculate processing time
@@ -8984,6 +9510,9 @@ async def analyze_visit_reports_consolidated(
 ):
     """Analyze all reports for a visit with consolidated AI analysis"""
     try:
+        # Check if AI is enabled for this doctor
+        check_ai_enabled(current_doctor)
+        
         start_time = datetime.now()
         
         # Verify the visit exists
@@ -9315,6 +9844,9 @@ async def batch_analyze_reports(
 ):
     """Queue multiple reports for AI analysis"""
     try:
+        # Check if AI is enabled for this doctor
+        check_ai_enabled(current_doctor)
+        
         queued_analyses = []
         failed_analyses = []
         
@@ -9412,6 +9944,9 @@ async def analyze_patient_comprehensive_history(
 ):
     """Generate comprehensive AI-powered analysis of complete patient history including all visits, reports, and medical journey"""
     try:
+        # Check if AI is enabled for this doctor
+        check_ai_enabled(current_doctor)
+        
         start_time = datetime.now()
         
         # Verify the patient exists and belongs to the current doctor

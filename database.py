@@ -186,17 +186,26 @@ class DatabaseManager:
     
     # Patient related operations
     async def get_patient_by_id(self, patient_id: int, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
-        """Get patient by ID for a specific doctor"""
+        """Get patient by ID for a specific doctor (CACHED)"""
         try:
-            print(f"Fetching patient by ID: {patient_id} for doctor: {doctor_firebase_uid}")
+            # Check cache first
+            if self.cache:
+                cache_key = f"patient:{patient_id}:{doctor_firebase_uid}"
+                cached_result = await self.cache.get(cache_key)
+                if cached_result is not None:
+                    return cached_result
             
             # Async Supabase call
             response = await self.supabase.table("patients").select("*").eq("id", patient_id).eq("created_by_doctor", doctor_firebase_uid).execute()
-            print(f"Supabase response for patient lookup: {response}")
             
-            if response.data:
-                return response.data[0]
-            return None
+            result = response.data[0] if response.data else None
+            
+            # Cache result
+            if self.cache and result:
+                cache_key = f"patient:{patient_id}:{doctor_firebase_uid}"
+                await self.cache.set(cache_key, result, ttl=600)  # Cache for 10 minutes
+            
+            return result
         except Exception as e:
             print(f"Error fetching patient by ID: {e}")
             print(f"Traceback: {traceback.format_exc()}")
@@ -253,6 +262,17 @@ class DatabaseManager:
             return False
 
     # Visit related operations
+    async def get_all_visits_by_doctor(self, doctor_firebase_uid: str, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get all recent visits for a doctor (for pending prescriptions check)"""
+        try:
+            # Get recent visits (last 30 days by default for performance)
+            response = await self.supabase.table("visits").select("*").eq("doctor_firebase_uid", doctor_firebase_uid).order("visit_date", desc=True).limit(limit).execute()
+            return response.data if response.data else []
+        except Exception as e:
+            print(f"Error fetching all visits by doctor: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return []
+
     async def get_visits_by_patient_id(self, patient_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
         """Get all visits for a patient by a specific doctor"""
         try:
@@ -269,14 +289,26 @@ class DatabaseManager:
             return []
 
     async def get_visit_by_id(self, visit_id: int, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
-        """Get visit by ID for a specific doctor"""
+        """Get visit by ID for a specific doctor (CACHED)"""
         try:
+            # Check cache first
+            if self.cache:
+                cache_key = f"visit:{visit_id}:{doctor_firebase_uid}"
+                cached_result = await self.cache.get(cache_key)
+                if cached_result is not None:
+                    return cached_result
+            
             # Async Supabase call
             response = await self.supabase.table("visits").select("*").eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             
-            if response.data:
-                return response.data[0]
-            return None
+            result = response.data[0] if response.data else None
+            
+            # Cache result
+            if self.cache and result:
+                cache_key = f"visit:{visit_id}:{doctor_firebase_uid}"
+                await self.cache.set(cache_key, result, ttl=300)  # Cache for 5 minutes
+            
+            return result
         except Exception as e:
             print(f"Error fetching visit: {e}")
             print(f"Traceback: {traceback.format_exc()}")
@@ -304,6 +336,14 @@ class DatabaseManager:
         try:
             # Async Supabase call
             response = await self.supabase.table("visits").update(update_data).eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
+            
+            # Invalidate cache on update
+            if self.cache and response.data:
+                await self.cache.delete(f"visit:{visit_id}:{doctor_firebase_uid}")
+                # Also invalidate child_visits cache if parent_visit_id changed
+                if "parent_visit_id" in update_data and update_data["parent_visit_id"]:
+                    await self.cache.delete(f"child_visits:{update_data['parent_visit_id']}:{doctor_firebase_uid}")
+            
             return bool(response.data)
         except Exception as e:
             print(f"Error updating visit: {e}")
@@ -311,14 +351,26 @@ class DatabaseManager:
             return False
 
     async def get_child_visits(self, parent_visit_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
-        """Get all child visits (follow-ups) for a parent visit"""
+        """Get all child visits (follow-ups) for a parent visit (CACHED)"""
         try:
-            print(f"Fetching child visits for parent visit: {parent_visit_id}")
+            # Check cache first
+            if self.cache:
+                cache_key = f"child_visits:{parent_visit_id}:{doctor_firebase_uid}"
+                cached_result = await self.cache.get(cache_key)
+                if cached_result is not None:
+                    return cached_result
             
             # Get all visits that have this visit as their parent
             response = await self.supabase.table("visits").select("*").eq("parent_visit_id", parent_visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("visit_date", desc=True).execute()
             
-            return response.data if response.data else []
+            result = response.data if response.data else []
+            
+            # Cache result
+            if self.cache:
+                cache_key = f"child_visits:{parent_visit_id}:{doctor_firebase_uid}"
+                await self.cache.set(cache_key, result, ttl=300)  # Cache for 5 minutes
+            
+            return result
         except Exception as e:
             print(f"Error fetching child visits: {e}")
             print(f"Traceback: {traceback.format_exc()}")
@@ -512,12 +564,26 @@ class DatabaseManager:
             return None
 
     async def get_ai_analyses_by_visit_id(self, visit_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
-        """Get all AI analyses for a visit"""
+        """Get all AI analyses for a visit (CACHED)"""
         try:
+            # Check cache first
+            if self.cache:
+                cache_key = f"ai_analyses_visit:{visit_id}:{doctor_firebase_uid}"
+                cached_result = await self.cache.get(cache_key)
+                if cached_result is not None:
+                    return cached_result
+            
             # Async Supabase call
             response = await self.supabase.table("ai_document_analysis").select("*").eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("analyzed_at", desc=True).execute()
             
-            return response.data if response.data else []
+            result = response.data if response.data else []
+            
+            # Cache result
+            if self.cache:
+                cache_key = f"ai_analyses_visit:{visit_id}:{doctor_firebase_uid}"
+                await self.cache.set(cache_key, result, ttl=300)  # Cache for 5 minutes
+            
+            return result
         except Exception as e:
             print(f"Error fetching AI analyses by visit ID: {e}")
             return []
@@ -778,13 +844,27 @@ class DatabaseManager:
             return None
 
     async def get_reports_by_visit_id(self, visit_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
-        """Get all reports for a visit"""
+        """Get all reports for a visit (CACHED)"""
         try:
+            # Check cache first
+            if self.cache:
+                cache_key = f"reports_visit:{visit_id}:{doctor_firebase_uid}"
+                cached_result = await self.cache.get(cache_key)
+                if cached_result is not None:
+                    return cached_result
+            
             # Async Supabase call
             response = await self.supabase.table("reports").select("*").eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("uploaded_at", desc=True).execute()
             
             reports = response.data if response.data else []
-            return [self._safe_report_data(report) for report in reports]
+            result = [self._safe_report_data(report) for report in reports]
+            
+            # Cache result
+            if self.cache:
+                cache_key = f"reports_visit:{visit_id}:{doctor_firebase_uid}"
+                await self.cache.set(cache_key, result, ttl=300)  # Cache for 5 minutes
+            
+            return result
         except Exception as e:
             print(f"Error fetching reports: {e}")
             print(f"Traceback: {traceback.format_exc()}")
@@ -961,6 +1041,18 @@ class DatabaseManager:
             return None
         except Exception as e:
             print(f"Error fetching PDF template by ID: {e}")
+            return None
+
+    async def get_doctor_prescription_template(self, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
+        """Get the default/first prescription template for a doctor"""
+        try:
+            # Get templates ordered by created_at, return the first one (most recent or default)
+            response = await self.supabase.table("pdf_templates").select("*").eq("doctor_firebase_uid", doctor_firebase_uid).order("created_at", desc=True).limit(1).execute()
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error fetching doctor prescription template: {e}")
             return None
 
     async def update_pdf_template(self, template_id: int, doctor_firebase_uid: str, update_data: Dict[str, Any]) -> bool:
@@ -1274,11 +1366,26 @@ class DatabaseManager:
             return None
 
     async def get_handwritten_visit_notes_by_visit_id(self, visit_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
-        """Get all handwritten visit notes for a specific visit"""
+        """Get all handwritten visit notes for a specific visit (CACHED)"""
         try:
+            # Check cache first
+            if self.cache:
+                cache_key = f"hw_notes_visit:{visit_id}:{doctor_firebase_uid}"
+                cached_result = await self.cache.get(cache_key)
+                if cached_result is not None:
+                    return cached_result
+            
             # Async Supabase call
             response = await self.supabase.table("handwritten_visit_notes").select("*").eq("visit_id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).eq("is_active", True).order("created_at", desc=True).execute()
-            return response.data if response.data else []
+            
+            result = response.data if response.data else []
+            
+            # Cache result
+            if self.cache:
+                cache_key = f"hw_notes_visit:{visit_id}:{doctor_firebase_uid}"
+                await self.cache.set(cache_key, result, ttl=300)  # Cache for 5 minutes
+            
+            return result
         except Exception as e:
             print(f"Error getting handwritten visit notes by visit ID: {e}")
             return []

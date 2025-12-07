@@ -59,10 +59,11 @@ class AIAnalysisService:
         file_type: str,
         patient_context: Dict[str, Any],
         visit_context: Dict[str, Any],
-        doctor_context: Dict[str, Any]
+        doctor_context: Dict[str, Any],
+        visit_chain_context: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """
-        Analyze a medical document using Gemini 2.0 Flash with patient and visit context
+        Analyze a medical document using Gemini 3 Pro with patient, visit, and linked visit chain context
         
         Args:
             file_content: The binary content of the file
@@ -87,12 +88,13 @@ class AIAnalysisService:
                     "analysis": None
                 }
             
-            # Create context-aware prompt
+            # Create context-aware prompt with linked visit history
             prompt = self._create_analysis_prompt(
                 patient_context, 
                 visit_context, 
                 doctor_context, 
-                file_name
+                file_name,
+                visit_chain_context
             )
             
             # Perform AI analysis
@@ -236,9 +238,10 @@ class AIAnalysisService:
         patient_context: Dict[str, Any], 
         visit_context: Dict[str, Any], 
         doctor_context: Dict[str, Any], 
-        file_name: str
+        file_name: str,
+        visit_chain_context: Optional[List[Dict[str, Any]]] = None
     ) -> str:
-        """Create a comprehensive analysis prompt with context"""
+        """Create a comprehensive analysis prompt with context including linked visit history"""
         
         # Extract patient information
         patient_name = f"{patient_context.get('first_name', '')} {patient_context.get('last_name', '')}"
@@ -281,6 +284,60 @@ class AIAnalysisService:
         doctor_name = f"Dr. {doctor_context.get('first_name', '')} {doctor_context.get('last_name', '')}"
         specialization = doctor_context.get('specialization', 'General Medicine')
         
+        # Build visit chain context section if available
+        visit_chain_section = ""
+        if visit_chain_context and len(visit_chain_context) > 0:
+            visit_chain_section = """
+**🔗 LINKED VISIT HISTORY (CRITICAL - THIS IS A FOLLOW-UP VISIT):**
+This visit is linked to previous visits. The patient has been seen before for related concerns.
+IMPORTANT: Use this history to provide continuity of care analysis.
+
+"""
+            for i, prev_visit in enumerate(visit_chain_context, 1):
+                prev_date = prev_visit.get('visit_date', 'Unknown date')
+                prev_complaint = prev_visit.get('chief_complaint', 'Not recorded')
+                prev_diagnosis = prev_visit.get('diagnosis', 'Not recorded')
+                prev_treatment = prev_visit.get('treatment_plan', 'Not recorded')
+                prev_medications = prev_visit.get('medications', 'None')
+                prev_tests = prev_visit.get('tests_recommended', 'None')
+                link_reason = prev_visit.get('link_reason', 'Follow-up')
+                
+                # Include AI analysis summary if available
+                ai_summary = ""
+                if prev_visit.get('ai_analyses_summary'):
+                    ai_findings = prev_visit.get('ai_analyses_summary', [])
+                    if ai_findings:
+                        ai_summary = "\\n    - Previous AI Findings: " + "; ".join([
+                            f"{a.get('document_summary', '')[:100]}" for a in ai_findings[:2]
+                        ])
+                
+                # Include reports info if available
+                reports_info = ""
+                if prev_visit.get('reports'):
+                    reports = prev_visit.get('reports', [])
+                    if reports:
+                        reports_info = f"\\n    - Reports Uploaded: {', '.join([r.get('file_name', 'Unknown') for r in reports[:3]])}"
+                
+                visit_chain_section += f"""
+  **Previous Visit #{i} ({link_reason}):**
+    - Date: {prev_date}
+    - Chief Complaint: {prev_complaint}
+    - Diagnosis: {prev_diagnosis}
+    - Treatment Given: {prev_treatment}
+    - Medications: {prev_medications}
+    - Tests Ordered: {prev_tests}{ai_summary}{reports_info}
+"""
+            
+            visit_chain_section += """
+⚠️ **CONTINUITY OF CARE INSTRUCTIONS:**
+- Compare current findings with previous visit data
+- Note any progression or regression of condition
+- Evaluate if previous treatment was effective
+- Consider if diagnosis needs to be updated based on new findings
+- Check if previously ordered tests are now being reviewed
+
+"""
+        
         prompt = f"""
 You are an advanced AI medical assistant helping {doctor_name} ({specialization}) analyze a medical document within the context of a specific patient visit. This analysis should be DIRECTLY RELEVANT to the doctor's clinical observations and treatment decisions.
 
@@ -291,7 +348,7 @@ You are an advanced AI medical assistant helping {doctor_name} ({specialization}
 - Blood Group: {blood_group}
 - Known Allergies: {allergies}
 - Medical History: {medical_history}
-
+{visit_chain_section}
 **CURRENT VISIT CONTEXT (CRITICAL FOR ANALYSIS):**
 - Visit Date: {visit_date}
 - Visit Type: {visit_type}
@@ -349,22 +406,33 @@ Given the current treatment plan: "{treatment_plan}" and medications: "{medicati
 - Are there any contraindications revealed by this report?
 - Should any medications be adjusted based on these findings?
 
-**6. ACTIONABLE NEXT STEPS:**
-Based on BOTH the report findings AND the visit context:
+**6. CONTINUITY OF CARE ANALYSIS (IF FOLLOW-UP VISIT):**
+⚠️ If this is a follow-up visit with linked visit history:
+- **Treatment Response:** How do current findings compare to previous visit? Is the patient improving?
+- **Diagnosis Validation:** Do current results confirm or change the previous diagnosis?
+- **Medication Effectiveness:** Are the previously prescribed medications working?
+- **Test Correlation:** If this test was ordered in a previous visit, what do results indicate?
+- **Disease Progression:** Any signs of progression or regression of the condition?
+- **Previous vs Current:** Direct comparison of any overlapping parameters from past reports
+
+**7. ACTIONABLE NEXT STEPS:**
+Based on BOTH the report findings AND the visit context (including previous visits):
 - Immediate actions for Dr. {doctor_name} to consider
 - Follow-up tests recommended (with justification)
 - Specialist referrals if indicated
 - Patient lifestyle modifications
 - Monitoring schedule recommendations
+- Treatment modifications based on previous visit outcomes
 
-**7. PATIENT COMMUNICATION GUIDANCE:**
+**8. PATIENT COMMUNICATION GUIDANCE:**
 - How should Dr. {doctor_name} explain these results to {patient_name}?
 - Key points to emphasize during patient consultation
 - Reassurance points if results are normal/mild
 - Concerns to discuss if results are abnormal
 - Simple, non-technical explanation of findings
+- Progress explanation if this is a follow-up
 
-**8. CLINICAL DOCUMENTATION NOTES:**
+**9. CLINICAL DOCUMENTATION NOTES:**
 - Important observations to add to medical records
 - Trends to monitor in future visits
 - Red flags for future reference
@@ -379,6 +447,8 @@ Based on BOTH the report findings AND the visit context:
 ✓ Consider the complete clinical picture, not isolated lab values
 ✓ Flag discrepancies between clinical findings and lab results
 ✓ Provide decision support, not just data interpretation
+✓ **If follow-up visit: ALWAYS compare with previous visit findings and treatments**
+✓ **Track treatment effectiveness across linked visits**
 
 This analysis should help Dr. {doctor_name} provide better care for {patient_name} by connecting the diagnostic data with the clinical presentation and treatment plan.
 """
@@ -1125,7 +1195,8 @@ Please structure your response clearly with appropriate medical terminology whil
         file_name: str,
         patient_context: Dict[str, Any],
         visit_context: Dict[str, Any],
-        doctor_context: Dict[str, Any]
+        doctor_context: Dict[str, Any],
+        visit_chain_context: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """
         Analyze a handwritten prescription PDF using Gemini 3 Pro's multimodal capabilities.
@@ -1137,6 +1208,7 @@ Please structure your response clearly with appropriate medical terminology whil
             patient_context: Patient information
             visit_context: Visit information (may be minimal if doctor only wrote on prescription)
             doctor_context: Doctor information
+            visit_chain_context: List of linked previous visits for continuity of care
         
         Returns:
             Dict containing analysis results including extracted content and medical interpretation
@@ -1156,7 +1228,8 @@ Please structure your response clearly with appropriate medical terminology whil
                 patient_context,
                 visit_context,
                 doctor_context,
-                file_name
+                file_name,
+                visit_chain_context
             )
             
             # Perform AI analysis using multimodal capabilities
@@ -1191,9 +1264,10 @@ Please structure your response clearly with appropriate medical terminology whil
         patient_context: Dict[str, Any],
         visit_context: Dict[str, Any],
         doctor_context: Dict[str, Any],
-        file_name: str
+        file_name: str,
+        visit_chain_context: Optional[List[Dict[str, Any]]] = None
     ) -> str:
-        """Create a specialized prompt for analyzing handwritten prescription PDFs"""
+        """Create a specialized prompt for analyzing handwritten prescription PDFs with linked visit context"""
         
         # Extract patient information
         patient_name = f"{patient_context.get('first_name', '')} {patient_context.get('last_name', '')}"
@@ -1231,6 +1305,45 @@ Please structure your response clearly with appropriate medical terminology whil
         doctor_name = f"Dr. {doctor_context.get('first_name', '')} {doctor_context.get('last_name', '')}"
         specialization = doctor_context.get('specialization', 'General Medicine')
         
+        # Build visit chain context section if available
+        visit_chain_section = ""
+        if visit_chain_context and len(visit_chain_context) > 0:
+            visit_chain_section = """
+**🔗 LINKED VISIT HISTORY (THIS IS A FOLLOW-UP VISIT):**
+This patient has been seen before for related concerns. Use this history for context.
+
+"""
+            for i, prev_visit in enumerate(visit_chain_context, 1):
+                prev_date = prev_visit.get('visit_date', 'Unknown date')
+                prev_complaint = prev_visit.get('chief_complaint', 'Not recorded')
+                prev_diagnosis = prev_visit.get('diagnosis', 'Not recorded')
+                prev_treatment = prev_visit.get('treatment_plan', 'Not recorded')
+                prev_medications = prev_visit.get('medications', 'None')
+                link_reason = prev_visit.get('link_reason', 'Follow-up')
+                
+                # Include previous handwritten notes summary if available
+                prev_notes = ""
+                if prev_visit.get('handwritten_summary'):
+                    prev_notes = f"\\n    - Previous Handwritten Notes Summary: {prev_visit.get('handwritten_summary', '')[:200]}"
+                
+                visit_chain_section += f"""
+  **Previous Visit #{i} ({link_reason}):**
+    - Date: {prev_date}
+    - Chief Complaint: {prev_complaint}
+    - Diagnosis: {prev_diagnosis}
+    - Treatment Given: {prev_treatment}
+    - Medications: {prev_medications}{prev_notes}
+"""
+            
+            visit_chain_section += """
+⚠️ **CONTINUITY INSTRUCTIONS:**
+- Compare current prescription with previous prescriptions
+- Note any changes in medications or dosages
+- Evaluate if this is a continuation or change of treatment
+- Flag if previous medications are being discontinued
+
+"""
+        
         prompt = f"""
 You are an advanced AI medical assistant with specialized training in reading and interpreting handwritten medical documents. You are helping {doctor_name} ({specialization}) by analyzing a handwritten prescription/visit notes for their patient.
 
@@ -1247,8 +1360,8 @@ This is a HANDWRITTEN prescription pad that the doctor has filled out during the
 - Blood Group: {blood_group}
 - Known Allergies: {allergies}
 - Medical History: {medical_history}
-
-**VISIT CONTEXT (from system):**
+{visit_chain_section}
+**CURRENT VISIT CONTEXT (from system):**
 - Visit Date: {visit_date}
 - Visit Type: {visit_type}
 - Chief Complaint (if entered): {chief_complaint}
