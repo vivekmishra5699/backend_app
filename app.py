@@ -58,11 +58,44 @@ whatsapp_service: Optional[WhatsAppService] = None
 ai_analysis_service: Optional[AIAnalysisService] = None
 ai_processor: Optional[AIAnalysisProcessor] = None
 background_task = None
+cleanup_task = None
+
+# In-memory set to track in-progress analyses (simple deduplication)
+_analyses_in_progress: set = set()
+
+async def periodic_queue_cleanup(db_instance, interval_hours: int = 1):
+    """
+    Background task to periodically clean up the AI analysis queue.
+    Runs every interval_hours and removes old completed/failed items.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval_hours * 3600)  # Sleep first, then cleanup
+            
+            print("🧹 Running periodic queue cleanup...")
+            
+            # Clean up completed items older than 24 hours
+            completed_cleaned = await db_instance.cleanup_completed_queue_items(hours_old=24)
+            
+            # Reset stale processing items (stuck for more than 2 hours)
+            stale_reset = await db_instance.cleanup_stale_processing_items(hours_stale=2)
+            
+            # Get queue stats for monitoring
+            stats = await db_instance.get_queue_stats()
+            print(f"📊 Queue stats after cleanup: {stats}")
+            
+        except asyncio.CancelledError:
+            print("🛑 Queue cleanup task cancelled")
+            break
+        except Exception as e:
+            print(f"❌ Error in periodic queue cleanup: {e}")
+            # Continue running despite errors
+            await asyncio.sleep(60)  # Wait a minute before retrying
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    global supabase, db, firebase_manager, whatsapp_service, ai_analysis_service, ai_processor, background_task
+    global supabase, db, firebase_manager, whatsapp_service, ai_analysis_service, ai_processor, background_task, cleanup_task
     
     print("🚀 Starting application...")
     
@@ -124,6 +157,18 @@ async def lifespan(app: FastAPI):
         # Start the background processor task
         background_task = asyncio.create_task(ai_processor.start_processing())
         print("✅ AI Analysis background processor started successfully")
+        
+        # Start periodic queue cleanup task (runs every hour)
+        cleanup_task = asyncio.create_task(periodic_queue_cleanup(db, interval_hours=1))
+        print("✅ Periodic queue cleanup task started (runs every hour)")
+        
+        # Run initial cleanup on startup
+        print("🧹 Running initial queue cleanup on startup...")
+        await db.cleanup_completed_queue_items(hours_old=24)
+        await db.cleanup_stale_processing_items(hours_stale=2)
+        initial_stats = await db.get_queue_stats()
+        print(f"📊 Initial queue stats: {initial_stats}")
+        
         yield
     except Exception as e:
         print(f"❌ Error starting background processor: {e}")
@@ -140,6 +185,15 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
         print("✅ AI Analysis background processor stopped")
+        
+        # Stop cleanup task
+        if cleanup_task:
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except asyncio.CancelledError:
+                pass
+        print("✅ Periodic cleanup task stopped")
         
         # Get cache stats before shutdown
         print("📊 Final cache statistics:")
@@ -1134,6 +1188,7 @@ class AIAnalysisResult(BaseModel):
     updated_at: Optional[str] = None
 
 class PatientHistoryAnalysis(BaseModel):
+    """Simplified patient history analysis - only essential fields"""
     id: int
     patient_id: int
     doctor_firebase_uid: str
@@ -1143,7 +1198,14 @@ class PatientHistoryAnalysis(BaseModel):
     total_reports: int
     model_used: str
     confidence_score: float
-    raw_analysis: str
+    raw_analysis: str  # Contains full AI analysis - frontend parses for display
+    analysis_success: bool
+    analysis_error: Optional[str] = None
+    processing_time_ms: Optional[int] = None
+    analyzed_at: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    # Legacy fields - kept for backward compatibility with existing records
     comprehensive_summary: Optional[str] = None
     medical_trajectory: Optional[str] = None
     chronic_conditions: Optional[List[str]] = None
@@ -1155,12 +1217,6 @@ class PatientHistoryAnalysis(BaseModel):
     lifestyle_factors: Optional[str] = None
     medication_history: Optional[str] = None
     follow_up_suggestions: Optional[List[str]] = None
-    analysis_success: bool
-    analysis_error: Optional[str] = None
-    processing_time_ms: Optional[int] = None
-    analyzed_at: str
-    created_at: Optional[str] = None
-    updated_at: Optional[str] = None
 
 class PatientHistoryAnalysisRequest(BaseModel):
     include_visits: bool = True
@@ -1697,7 +1753,12 @@ def check_ai_enabled(doctor: dict) -> None:
     if not doctor.get("ai_enabled", True):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="AI analysis is disabled for your account. Enable it in Settings to use AI features."
+            detail={
+                "message": "AI analysis is disabled for your account",
+                "action_required": "Enable AI in Settings → Profile → Toggle AI Analysis",
+                "ai_enabled": False,
+                "endpoint_to_enable": "/profile/toggle-ai"
+            }
         )
 
 
@@ -10269,6 +10330,55 @@ async def get_ai_processor_status(current_doctor: dict = Depends(get_current_doc
             detail="Failed to get processor status"
         )
 
+@app.get("/ai-queue-stats")
+async def get_ai_queue_stats(current_doctor: dict = Depends(get_current_doctor)):
+    """Get AI analysis queue statistics"""
+    try:
+        # Get overall queue stats
+        overall_stats = await db.get_queue_stats()
+        
+        # Get doctor-specific stats
+        doctor_stats = await db.get_queue_stats(current_doctor["firebase_uid"])
+        
+        return {
+            "overall_queue": overall_stats,
+            "your_queue": doctor_stats
+        }
+    except Exception as e:
+        print(f"Error getting queue stats: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get queue statistics"
+        )
+
+@app.post("/ai-queue-cleanup")
+async def trigger_queue_cleanup(current_doctor: dict = Depends(get_current_doctor)):
+    """Manually trigger AI analysis queue cleanup"""
+    try:
+        # Get stats before cleanup
+        before_stats = await db.get_queue_stats()
+        
+        # Run cleanup
+        completed_cleaned = await db.cleanup_completed_queue_items(hours_old=24)
+        stale_reset = await db.cleanup_stale_processing_items(hours_stale=2)
+        
+        # Get stats after cleanup
+        after_stats = await db.get_queue_stats()
+        
+        return {
+            "message": "Queue cleanup completed",
+            "completed_items_removed": completed_cleaned,
+            "stale_items_reset": stale_reset,
+            "queue_before": before_stats,
+            "queue_after": after_stats
+        }
+    except Exception as e:
+        print(f"Error during manual queue cleanup: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to cleanup queue"
+        )
+
 @app.post("/patients/{patient_id}/analyze-comprehensive-history", response_model=dict)
 async def analyze_patient_comprehensive_history(
     patient_id: int,
@@ -10276,6 +10386,20 @@ async def analyze_patient_comprehensive_history(
     current_doctor = Depends(get_current_doctor)
 ):
     """Generate comprehensive AI-powered analysis of complete patient history including all visits, reports, and medical journey"""
+    # Create a unique key for this patient + doctor combination
+    analysis_key = f"analysis_{patient_id}_{current_doctor['firebase_uid']}"
+    
+    # Check if analysis is already in progress (prevent duplicate concurrent requests)
+    if analysis_key in _analyses_in_progress:
+        return {
+            "message": "Analysis already in progress for this patient. Please wait for it to complete.",
+            "already_in_progress": True,
+            "analysis": None
+        }
+    
+    # Mark analysis as in progress
+    _analyses_in_progress.add(analysis_key)
+    
     try:
         # Check if AI is enabled for this doctor
         check_ai_enabled(current_doctor)
@@ -10363,7 +10487,11 @@ async def analyze_patient_comprehensive_history(
         # Get existing AI analyses for this patient
         existing_ai_analyses = await db.get_ai_analyses_by_patient_id(patient_id, current_doctor["firebase_uid"])
         
-        if not visits and not reports:
+        # Get all handwritten notes for this patient
+        handwritten_notes = await db.get_handwritten_visit_notes_by_patient_id(patient_id, current_doctor["firebase_uid"])
+        print(f"📝 Found {len(handwritten_notes)} handwritten notes for patient {patient_id}")
+        
+        if not visits and not reports and not handwritten_notes:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="No medical data found for this patient in the specified period"
@@ -10397,12 +10525,36 @@ async def analyze_patient_comprehensive_history(
                 else:
                     print(f"⚠️ Failed to download report {report['id']}")
         
+        # Download handwritten note PDFs for analysis
+        handwritten_documents = []
+        if handwritten_notes:
+            hw_urls = [note["handwritten_pdf_url"] for note in handwritten_notes if note.get("handwritten_pdf_url")]
+            if hw_urls:
+                hw_downloaded = await file_downloader.download_multiple_files(
+                    urls=hw_urls,
+                    concurrent_limit=5
+                )
+                for note in handwritten_notes:
+                    hw_url = note.get("handwritten_pdf_url")
+                    if hw_url and hw_url in hw_downloaded and hw_downloaded[hw_url]:
+                        handwritten_documents.append({
+                            "content": hw_downloaded[hw_url],
+                            "file_name": note.get("handwritten_pdf_filename", "handwritten_note.pdf"),
+                            "file_type": "application/pdf",
+                            "visit_id": note.get("visit_id"),
+                            "created_at": note.get("created_at")
+                        })
+                        print(f"✅ Downloaded handwritten note for visit {note.get('visit_id')}")
+        
+        print(f"📊 Comprehensive analysis data: {len(visits)} visits, {len(reports)} reports, {len(report_documents)} downloaded reports, {len(handwritten_documents)} handwritten notes")
+        
         # Perform comprehensive patient history analysis
         analysis_result = await ai_analysis_service.analyze_patient_comprehensive_history(
             patient_context=patient,
             visits=visits,
             reports=report_documents,
             existing_analyses=existing_ai_analyses,
+            handwritten_notes=handwritten_documents,
             doctor_context=current_doctor,
             analysis_period_months=request_data.analysis_period_months
         )
@@ -10438,6 +10590,8 @@ async def analyze_patient_comprehensive_history(
         
         if analysis_result["success"]:
             # Store comprehensive analysis in database
+            # Only save essential fields - raw_analysis contains everything
+            # Frontend parses and formats the raw_analysis for display
             analysis_data = {
                 "patient_id": patient_id,
                 "doctor_firebase_uid": current_doctor["firebase_uid"],
@@ -10448,17 +10602,6 @@ async def analyze_patient_comprehensive_history(
                 "model_used": "gemini-2.0-flash-exp",
                 "confidence_score": analysis_result.get("confidence_score", 0.85),
                 "raw_analysis": analysis_result["comprehensive_analysis"],
-                "comprehensive_summary": analysis_result.get("summary"),
-                "medical_trajectory": analysis_result.get("medical_trajectory"),
-                "chronic_conditions": analysis_result.get("chronic_conditions", []),
-                "recurring_patterns": analysis_result.get("recurring_patterns", []),
-                "treatment_effectiveness": analysis_result.get("treatment_effectiveness"),
-                "risk_factors": analysis_result.get("risk_factors", []),
-                "recommendations": analysis_result.get("recommendations", []),
-                "significant_findings": analysis_result.get("significant_findings", []),
-                "lifestyle_factors": analysis_result.get("lifestyle_factors"),
-                "medication_history": analysis_result.get("medication_history"),
-                "follow_up_suggestions": analysis_result.get("follow_up_suggestions", []),
                 "analysis_success": True,
                 "analysis_error": None,
                 "processing_time_ms": int(processing_time),
@@ -10523,6 +10666,9 @@ async def analyze_patient_comprehensive_history(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to perform comprehensive patient history analysis"
         )
+    finally:
+        # Always remove the analysis key when done (success or failure)
+        _analyses_in_progress.discard(analysis_key)
 
 @app.get("/patients/{patient_id}/history-analysis", response_model=PatientHistoryAnalysis)
 async def get_patient_history_analysis(

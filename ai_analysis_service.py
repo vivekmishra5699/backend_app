@@ -844,33 +844,38 @@ Focus on creating a cohesive medical narrative that helps Dr. {doctor_name} make
         reports: List[Dict[str, Any]],
         existing_analyses: List[Dict[str, Any]],
         doctor_context: Dict[str, Any],
-        analysis_period_months: Optional[int] = None
+        analysis_period_months: Optional[int] = None,
+        handwritten_notes: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """
         Perform comprehensive analysis of patient's complete medical history
+        including visits, reports, handwritten notes, and all available medical data.
         
         Args:
             patient_context: Patient information and demographics
-            visits: List of all patient visits
-            reports: List of all medical reports/documents
+            visits: List of all patient visits with full details
+            reports: List of all medical reports/documents with content
             existing_analyses: Previous AI analyses for this patient
             doctor_context: Doctor information
             analysis_period_months: Optional time period limit
+            handwritten_notes: List of handwritten prescription/note documents
         
         Returns:
             Dict containing comprehensive analysis results
         """
         try:
-            print(f"Starting comprehensive history analysis for patient {patient_context.get('id')}")
+            print(f"🔍 Starting comprehensive history analysis for patient {patient_context.get('id')}")
+            print(f"   📊 Data points: {len(visits)} visits, {len(reports)} reports, {len(handwritten_notes or [])} handwritten notes, {len(existing_analyses)} AI analyses")
             
-            # Prepare comprehensive prompt
+            # Prepare comprehensive prompt with ALL data
             prompt = self._create_comprehensive_history_prompt(
                 patient_context,
                 visits,
                 reports,
                 existing_analyses,
                 doctor_context,
-                analysis_period_months
+                analysis_period_months,
+                handwritten_notes
             )
             
             # Perform analysis using Gemini 3 Pro with HIGH thinking for complex reasoning
@@ -906,15 +911,13 @@ Focus on creating a cohesive medical narrative that helps Dr. {doctor_name} make
                     "error": "Failed to generate analysis text"
                 }
             
-            # Parse and structure the analysis
-            structured_analysis = self._parse_comprehensive_analysis(analysis_text)
-            
+            # Return raw analysis - frontend handles formatting/parsing
+            # This saves processing time and avoids unreliable text parsing
             return {
                 "success": True,
                 "comprehensive_analysis": analysis_text,
                 "confidence_score": 0.85,
-                "processed_at": datetime.now(timezone.utc).isoformat(),
-                **structured_analysis
+                "processed_at": datetime.now(timezone.utc).isoformat()
             }
             
         except Exception as e:
@@ -932,9 +935,10 @@ Focus on creating a cohesive medical narrative that helps Dr. {doctor_name} make
         reports: List[Dict[str, Any]],
         existing_analyses: List[Dict[str, Any]],
         doctor_context: Dict[str, Any],
-        analysis_period_months: Optional[int] = None
+        analysis_period_months: Optional[int] = None,
+        handwritten_notes: Optional[List[Dict[str, Any]]] = None
     ) -> str:
-        """Create a comprehensive prompt for patient history analysis"""
+        """Create a comprehensive prompt for patient history analysis with ALL available data"""
         
         patient_name = f"{patient_context.get('first_name', '')} {patient_context.get('last_name', '')}"
         doctor_name = f"Dr. {doctor_context.get('first_name', '')} {doctor_context.get('last_name', '')}"
@@ -957,127 +961,323 @@ Focus on creating a cohesive medical narrative that helps Dr. {doctor_name} make
         else:
             period_text = " across their complete medical history"
         
-        # Prepare visits summary
+        # Prepare DETAILED visits summary with ALL information
         visits_summary = ""
         if visits:
-            visits_summary = f"\n**MEDICAL VISITS ({len(visits)} total):**\n"
-            for i, visit in enumerate(visits[:10], 1):  # Limit to 10 most recent
+            visits_summary = f"\n\n═══════════════════════════════════════════════════════════════\n**📋 COMPLETE MEDICAL VISITS ({len(visits)} total)**\n═══════════════════════════════════════════════════════════════\n"
+            for i, visit in enumerate(visits, 1):
                 visit_date = visit.get('visit_date', 'Unknown date')
                 visit_type = visit.get('visit_type', 'General')
                 chief_complaint = visit.get('chief_complaint', 'Not specified')
+                symptoms = visit.get('symptoms', 'Not documented')
                 diagnosis = visit.get('diagnosis', 'Not specified')
                 treatment = visit.get('treatment_plan', 'Not specified')
                 medications = visit.get('medications', 'None prescribed')
+                clinical_exam = visit.get('clinical_examination', 'Not documented')
+                tests_recommended = visit.get('tests_recommended', 'None')
+                follow_up = visit.get('follow_up_date', 'Not scheduled')
+                notes = visit.get('notes', '')
+                
+                # Extract vitals with all measurements
+                vitals_text = "Not recorded"
+                vitals = visit.get('vitals', {})
+                if vitals:
+                    vitals_parts = []
+                    if vitals.get('temperature'):
+                        vitals_parts.append(f"Temp: {vitals['temperature']}°F")
+                    if vitals.get('blood_pressure_systolic') and vitals.get('blood_pressure_diastolic'):
+                        vitals_parts.append(f"BP: {vitals['blood_pressure_systolic']}/{vitals['blood_pressure_diastolic']} mmHg")
+                    if vitals.get('heart_rate'):
+                        vitals_parts.append(f"HR: {vitals['heart_rate']} bpm")
+                    if vitals.get('respiratory_rate'):
+                        vitals_parts.append(f"RR: {vitals['respiratory_rate']}/min")
+                    if vitals.get('oxygen_saturation'):
+                        vitals_parts.append(f"SpO2: {vitals['oxygen_saturation']}%")
+                    if vitals.get('weight'):
+                        vitals_parts.append(f"Weight: {vitals['weight']} kg")
+                    if vitals.get('height'):
+                        vitals_parts.append(f"Height: {vitals['height']} cm")
+                    if vitals.get('bmi'):
+                        vitals_parts.append(f"BMI: {vitals['bmi']}")
+                    if vitals_parts:
+                        vitals_text = " | ".join(vitals_parts)
                 
                 visits_summary += f"""
-{i}. **{visit_date} - {visit_type}**
-   - Chief Complaint: {chief_complaint}
-   - Diagnosis: {diagnosis}
-   - Treatment: {treatment}
-   - Medications: {medications}"""
-            
-            if len(visits) > 10:
-                visits_summary += f"\n... and {len(visits) - 10} more visits"
+┌─────────────────────────────────────────────────────────────────
+│ 📅 VISIT #{i}: {visit_date} ({visit_type})
+├─────────────────────────────────────────────────────────────────
+│ 🔴 Chief Complaint: {chief_complaint}
+│ 📝 Symptoms: {symptoms}
+│ 🩺 Vitals: {vitals_text}
+│ 🔍 Clinical Examination: {clinical_exam}
+│ ✅ Diagnosis: {diagnosis}
+│ 💊 Medications Prescribed: {medications}
+│ 📋 Treatment Plan: {treatment}
+│ 🧪 Tests Recommended: {tests_recommended}
+│ 📆 Follow-up Date: {follow_up}
+│ 📝 Additional Notes: {notes if notes else 'None'}
+└─────────────────────────────────────────────────────────────────
+"""
         
-        # Prepare reports summary
+        # Prepare DETAILED reports summary with content
         reports_summary = ""
         if reports:
-            reports_summary = f"\n**MEDICAL REPORTS/TESTS ({len(reports)} total):**\n"
-            for i, report in enumerate(reports[:10], 1):  # Limit to 10 most recent
+            reports_summary = f"\n\n═══════════════════════════════════════════════════════════════\n**🔬 MEDICAL REPORTS & LAB TESTS ({len(reports)} total)**\n═══════════════════════════════════════════════════════════════\n"
+            for i, report in enumerate(reports, 1):
                 file_name = report.get('file_name', 'Unknown file')
                 test_type = report.get('test_type', 'General Report')
                 uploaded_date = report.get('uploaded_at', 'Unknown date')
+                visit_id = report.get('visit_id', 'N/A')
                 
-                reports_summary += f"\n{i}. **{file_name}** ({test_type}) - {uploaded_date}"
-            
-            if len(reports) > 10:
-                reports_summary += f"\n... and {len(reports) - 10} more reports"
+                # Extract text content from the report if available
+                content_preview = ""
+                if report.get('content'):
+                    try:
+                        # Try to decode content
+                        raw_content = report['content']
+                        if isinstance(raw_content, bytes):
+                            # For PDFs, extract text using PyPDF2
+                            import io
+                            try:
+                                import PyPDF2
+                                pdf_reader = PyPDF2.PdfReader(io.BytesIO(raw_content))
+                                text_content = ""
+                                for page in pdf_reader.pages[:3]:  # First 3 pages
+                                    text_content += page.extract_text() + "\n"
+                                if text_content.strip():
+                                    content_preview = text_content[:2000]  # Limit to 2000 chars
+                            except:
+                                pass
+                        elif isinstance(raw_content, str):
+                            content_preview = raw_content[:2000]
+                    except:
+                        pass
+                
+                reports_summary += f"""
+┌─────────────────────────────────────────────────────────────────
+│ 📄 REPORT #{i}: {file_name}
+├─────────────────────────────────────────────────────────────────
+│ 🏷️ Test Type: {test_type}
+│ 📅 Uploaded: {uploaded_date}
+│ 🔗 Associated Visit ID: {visit_id}
+"""
+                if content_preview:
+                    reports_summary += f"""│ 📊 REPORT CONTENT/FINDINGS:
+│ {content_preview[:1500]}{'...' if len(content_preview) > 1500 else ''}
+"""
+                reports_summary += "└─────────────────────────────────────────────────────────────────\n"
+        
+        # Prepare handwritten notes summary
+        handwritten_summary = ""
+        if handwritten_notes:
+            handwritten_summary = f"\n\n═══════════════════════════════════════════════════════════════\n**✍️ HANDWRITTEN NOTES & PRESCRIPTIONS ({len(handwritten_notes)} total)**\n═══════════════════════════════════════════════════════════════\n"
+            for i, note in enumerate(handwritten_notes, 1):
+                file_name = note.get('file_name', 'Handwritten Note')
+                created_at = note.get('created_at', 'Unknown date')
+                visit_id = note.get('visit_id', 'N/A')
+                
+                # Extract text from handwritten note PDF
+                content_preview = ""
+                if note.get('content'):
+                    try:
+                        raw_content = note['content']
+                        if isinstance(raw_content, bytes):
+                            import io
+                            try:
+                                import PyPDF2
+                                pdf_reader = PyPDF2.PdfReader(io.BytesIO(raw_content))
+                                text_content = ""
+                                for page in pdf_reader.pages[:2]:
+                                    text_content += page.extract_text() + "\n"
+                                if text_content.strip():
+                                    content_preview = text_content[:1500]
+                            except:
+                                pass
+                    except:
+                        pass
+                
+                handwritten_summary += f"""
+┌─────────────────────────────────────────────────────────────────
+│ ✍️ HANDWRITTEN NOTE #{i}: {file_name}
+├─────────────────────────────────────────────────────────────────
+│ 📅 Created: {created_at}
+│ 🔗 Associated Visit ID: {visit_id}
+"""
+                if content_preview:
+                    handwritten_summary += f"""│ 📝 EXTRACTED CONTENT:
+│ {content_preview}
+"""
+                handwritten_summary += "└─────────────────────────────────────────────────────────────────\n"
         
         # Prepare existing analyses summary
         analyses_summary = ""
         if existing_analyses:
-            analyses_summary = f"\n**PREVIOUS AI ANALYSES ({len(existing_analyses)} total):**\n"
-            for i, analysis in enumerate(existing_analyses[:5], 1):  # Limit to 5 most recent
+            analyses_summary = f"\n\n═══════════════════════════════════════════════════════════════\n**🤖 PREVIOUS AI ANALYSES ({len(existing_analyses)} total)**\n═══════════════════════════════════════════════════════════════\n"
+            for i, analysis in enumerate(existing_analyses[:5], 1):
                 analyzed_date = analysis.get('analyzed_at', 'Unknown date')
+                document_summary = analysis.get('document_summary', 'Not available')
                 clinical_significance = analysis.get('clinical_significance', 'Not available')
                 key_findings = analysis.get('key_findings', [])
+                actionable_insights = analysis.get('actionable_insights', 'Not available')
                 
                 analyses_summary += f"""
-{i}. **Analysis from {analyzed_date}**
-   - Clinical Significance: {clinical_significance[:200]}...
-   - Key Findings: {', '.join(key_findings[:3]) if key_findings else 'None specified'}"""
+┌─────────────────────────────────────────────────────────────────
+│ 🤖 AI ANALYSIS #{i}: {analyzed_date}
+├─────────────────────────────────────────────────────────────────
+│ 📋 Document Summary: {str(document_summary)[:500]}...
+│ 🎯 Clinical Significance: {str(clinical_significance)[:500]}...
+│ 🔑 Key Findings: {', '.join(key_findings[:5]) if key_findings else 'None identified'}
+│ 💡 Actionable Insights: {str(actionable_insights)[:300]}...
+└─────────────────────────────────────────────────────────────────
+"""
         
+        # Build the comprehensive mega-prompt
         prompt = f"""
-You are an advanced AI medical assistant helping {doctor_name} ({doctor_specialization}) analyze the complete medical history of {patient_name} ({patient_age}){period_text}.
+╔═══════════════════════════════════════════════════════════════════════════════╗
+║                    🏥 COMPREHENSIVE PATIENT HISTORY ANALYSIS                   ║
+║                         DEEP MEDICAL PATTERN DETECTION                         ║
+╚═══════════════════════════════════════════════════════════════════════════════╝
 
-**PATIENT DEMOGRAPHICS:**
-- Name: {patient_name}
-- Age: {patient_age}
-- Gender: {patient_context.get('gender', 'Not specified')}
-- Blood Group: {patient_context.get('blood_group', 'Not specified')}
-- Known Allergies: {patient_context.get('allergies', 'None reported')}
-- Medical History: {patient_context.get('medical_history', 'None provided')}
-- Emergency Contact: {patient_context.get('emergency_contact_name', 'Not provided')}
+You are an advanced AI medical assistant with expertise in pattern recognition, clinical correlation, and comprehensive medical history analysis. You are helping {doctor_name} ({doctor_specialization}) analyze the COMPLETE medical history of {patient_name} ({patient_age}){period_text}.
 
+Your task is to find patterns, correlations, missed opportunities, and provide insights that a human might overlook by reviewing ALL the data together.
+
+═══════════════════════════════════════════════════════════════
+**👤 PATIENT DEMOGRAPHICS**
+═══════════════════════════════════════════════════════════════
+┌─────────────────────────────────────────────────────────────────
+│ 📛 Name: {patient_name}
+│ 🎂 Age: {patient_age}
+│ 👤 Gender: {patient_context.get('gender', 'Not specified')}
+│ 🩸 Blood Group: {patient_context.get('blood_group', 'Not specified')}
+│ ⚠️ Known Allergies: {patient_context.get('allergies', 'None reported')}
+│ 🏥 Medical History: {patient_context.get('medical_history', 'None provided')}
+│ 📞 Emergency Contact: {patient_context.get('emergency_contact_name', 'Not provided')}
+│ 📧 Email: {patient_context.get('email', 'Not provided')}
+│ 📱 Phone: {patient_context.get('phone', 'Not provided')}
+└─────────────────────────────────────────────────────────────────
 {visits_summary}
-
 {reports_summary}
-
+{handwritten_summary}
 {analyses_summary}
 
-**COMPREHENSIVE ANALYSIS REQUEST:**
+═══════════════════════════════════════════════════════════════════════════════
+                    🎯 COMPREHENSIVE ANALYSIS INSTRUCTIONS
+═══════════════════════════════════════════════════════════════════════════════
 
-Please provide a thorough, professional analysis covering:
+**YOUR MISSION: Analyze ALL the above data to provide insights that would be impossible to see by looking at individual pieces. Think like a detective connecting clues across time.**
 
-1. **COMPREHENSIVE MEDICAL SUMMARY:**
-   - Overall health trajectory and patterns
-   - Significant medical events and milestones
-   - Evolution of health conditions over time
+Please provide an extremely thorough analysis covering:
 
-2. **MEDICAL TRAJECTORY ANALYSIS:**
-   - How the patient's health has changed over time
-   - Progression of any chronic conditions
-   - Response to previous treatments
+## 1. 🏥 COMPREHENSIVE MEDICAL SUMMARY
+- Create a complete narrative of this patient's health journey
+- Summarize the key medical events and their significance
+- What is the overall "story" of this patient's health?
 
-3. **CHRONIC CONDITIONS & PATTERNS:**
-   - Identify any chronic or recurring conditions
-   - Patterns in symptoms or health issues
-   - Seasonal or cyclical patterns
+## 2. 📈 MEDICAL TRAJECTORY & TRENDS
+- How has the patient's health changed over time?
+- Are they getting better, worse, or stable?
+- What trends do you see in vitals, symptoms, or conditions?
+- Graph-like description of health trajectory (improving/declining/stable periods)
 
-4. **TREATMENT EFFECTIVENESS:**
-   - Analysis of how well treatments have worked
-   - Medication compliance and effectiveness
-   - Treatment modifications over time
+## 3. 🔄 CHRONIC CONDITIONS & RECURRING ISSUES
+- Identify any chronic or recurring conditions
+- Which symptoms keep appearing?
+- Are there seasonal or cyclical patterns?
+- What conditions require ongoing management?
 
-5. **RISK FACTORS IDENTIFICATION:**
-   - Current and emerging health risks
-   - Lifestyle factors affecting health
-   - Genetic or hereditary concerns
+## 4. 🔍 PATTERN DETECTION (CRITICAL!)
+**Look for patterns that might be missed:**
+- Are there correlations between symptoms and timing?
+- Do certain medications seem to trigger new symptoms?
+- Are there environmental or lifestyle factors triggering issues?
+- What clusters of symptoms appear together?
+- Are there warning signs that appeared before major health events?
 
-6. **SIGNIFICANT CLINICAL FINDINGS:**
-   - Most important test results and findings
-   - Abnormal values requiring attention
-   - Trends in laboratory values
+## 5. ⚠️ MISSED OPPORTUNITIES & CONCERNS
+**This is crucial - what might have been overlooked?**
+- Are there test results that should have prompted action?
+- Were there symptoms that might indicate something more serious?
+- Are there recommended tests that were never done?
+- Are there medication interactions to be concerned about?
+- What diagnoses might have been missed?
 
-7. **COMPREHENSIVE RECOMMENDATIONS:**
-   - Preventive care recommendations
-   - Lifestyle modifications
-   - Follow-up care planning
-   - Screening recommendations
+## 6. 💊 TREATMENT EFFECTIVENESS REVIEW
+- Which treatments have worked well?
+- Which treatments haven't shown improvement?
+- Are there alternative treatments to consider?
+- Is the patient responding to current medication regimens?
+- Medication compliance patterns (if detectable)
 
-8. **LIFESTYLE & MEDICATION HISTORY:**
-   - Impact of lifestyle factors on health
-   - Medication history and interactions
-   - Side effects or adverse reactions
+## 7. 🚨 RISK FACTOR IDENTIFICATION
+- Current health risks
+- Emerging risks based on trends
+- Lifestyle factors affecting health
+- Age-appropriate health concerns
+- Genetic/hereditary risk indicators
 
-9. **FOLLOW-UP SUGGESTIONS:**
-   - Recommended monitoring schedule
-   - Specialist referrals if needed
-   - Future diagnostic tests
+## 8. 📊 SIGNIFICANT FINDINGS SUMMARY
+- List the most important findings across ALL data
+- What would you definitely want to discuss with the patient?
+- What requires immediate attention?
 
-This analysis will help Dr. {doctor_name} provide comprehensive, informed care for {patient_name}, especially if they're returning after a long time. Focus on clinically relevant insights that will enhance patient care and decision-making.
+## 9. ✨ ACTIONABLE RECOMMENDATIONS
+**Specific, prioritized recommendations:**
+- Immediate actions (within 1 week)
+- Short-term actions (within 1 month)
+- Long-term health management strategies
+- Preventive care recommendations
+- Lifestyle modification suggestions
+- Screening tests to consider
 
-Please structure your response clearly with appropriate medical terminology while ensuring it's comprehensive and actionable.
+## 10. 💬 PATIENT COMMUNICATION GUIDE
+- How to explain the overall health status to the patient
+- Key points to emphasize in patient consultation
+- Areas where patient education is needed
+- Motivational approaches for lifestyle changes
+
+## 11. 📅 FOLLOW-UP & MONITORING PLAN
+- Recommended monitoring schedule
+- Tests that should be repeated and when
+- Specialist referrals if indicated
+- Red flags to watch for
+
+## 12. 🔗 DATA CORRELATION INSIGHTS
+**Connect the dots between different pieces of data:**
+- How do lab results relate to symptoms?
+- Do physical exam findings match test results?
+- Are there inconsistencies that need clarification?
+- How do different visits relate to each other?
+
+═══════════════════════════════════════════════════════════════════════════════
+                            ⚡ CRITICAL PRINCIPLES
+═══════════════════════════════════════════════════════════════════════════════
+
+✓ Think holistically - every piece of data might connect to another
+✓ Look for what's NOT there as much as what IS there
+✓ Consider time relationships between events
+✓ Flag anything that seems unusual or worth investigating
+✓ Be specific and actionable in recommendations
+✓ Consider the patient's age, gender, and overall context
+✓ If something doesn't make sense, mention it as a concern
+✓ Prioritize findings by clinical importance
+✓ Think about quality of life, not just medical metrics
+
+This comprehensive analysis will help {doctor_name} provide the best possible care for {patient_name}, especially if they're returning after a gap or if this is a complex case requiring a holistic view.
+
+═══════════════════════════════════════════════════════════════════════════════
+                         📝 FORMAT YOUR RESPONSE
+═══════════════════════════════════════════════════════════════════════════════
+
+Use clear markdown formatting with:
+- **Bold** for important points
+- Bullet points for lists
+- Clear section headers
+- Numbered items for prioritized recommendations
+- ⚠️ for warnings/concerns
+- ✅ for positive findings
+- 🔍 for insights that require further investigation
+
 """
         
         return prompt

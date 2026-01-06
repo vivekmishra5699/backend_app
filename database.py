@@ -750,6 +750,88 @@ class DatabaseManager:
             print(f"Error deleting AI analyses for visit: {e}")
             return 0
 
+    async def cleanup_completed_queue_items(self, hours_old: int = 24) -> int:
+        """
+        Clean up completed/failed queue items older than specified hours.
+        This is the garbage collection for the AI analysis queue.
+        """
+        try:
+            from datetime import timedelta
+            cutoff_time = (datetime.now(timezone.utc) - timedelta(hours=hours_old)).isoformat()
+            
+            # Delete completed items older than cutoff
+            completed_response = await self.supabase.table("ai_analysis_queue").delete().eq("status", "completed").lt("completed_at", cutoff_time).execute()
+            completed_deleted = len(completed_response.data) if completed_response.data else 0
+            
+            # Delete failed items older than cutoff (after max retries exhausted)
+            failed_response = await self.supabase.table("ai_analysis_queue").delete().eq("status", "failed").lt("completed_at", cutoff_time).execute()
+            failed_deleted = len(failed_response.data) if failed_response.data else 0
+            
+            total_deleted = completed_deleted + failed_deleted
+            if total_deleted > 0:
+                print(f"🧹 Queue cleanup: Deleted {completed_deleted} completed + {failed_deleted} failed items older than {hours_old}h")
+            
+            return total_deleted
+        except Exception as e:
+            print(f"Error cleaning up queue items: {e}")
+            return 0
+
+    async def cleanup_stale_processing_items(self, hours_stale: int = 2) -> int:
+        """
+        Reset stale 'processing' items that got stuck (e.g., server crashed mid-processing).
+        Items stuck in 'processing' for too long are reset to 'pending' for retry.
+        """
+        try:
+            from datetime import timedelta
+            cutoff_time = (datetime.now(timezone.utc) - timedelta(hours=hours_stale)).isoformat()
+            
+            # Find items stuck in processing
+            stale_response = await self.supabase.table("ai_analysis_queue").select("id").eq("status", "processing").lt("started_at", cutoff_time).execute()
+            
+            if not stale_response.data:
+                return 0
+            
+            stale_ids = [item["id"] for item in stale_response.data]
+            reset_count = 0
+            
+            for queue_id in stale_ids:
+                # Reset to pending with incremented retry count
+                update_response = await self.supabase.table("ai_analysis_queue").update({
+                    "status": "pending",
+                    "started_at": None,
+                    "error_message": "Reset from stale processing state",
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }).eq("id", queue_id).execute()
+                
+                if update_response.data:
+                    reset_count += 1
+            
+            if reset_count > 0:
+                print(f"🔄 Queue cleanup: Reset {reset_count} stale processing items (stuck > {hours_stale}h)")
+            
+            return reset_count
+        except Exception as e:
+            print(f"Error resetting stale processing items: {e}")
+            return 0
+
+    async def get_queue_stats(self, doctor_firebase_uid: str = None) -> Dict[str, int]:
+        """Get queue statistics for monitoring"""
+        try:
+            stats = {"pending": 0, "processing": 0, "completed": 0, "failed": 0, "total": 0}
+            
+            for status_name in ["pending", "processing", "completed", "failed"]:
+                query = self.supabase.table("ai_analysis_queue").select("id", count="exact")
+                if doctor_firebase_uid:
+                    query = query.eq("doctor_firebase_uid", doctor_firebase_uid)
+                response = await query.eq("status", status_name).execute()
+                stats[status_name] = response.count if response.count else 0
+            
+            stats["total"] = sum(stats[s] for s in ["pending", "processing", "completed", "failed"])
+            return stats
+        except Exception as e:
+            print(f"Error getting queue stats: {e}")
+            return {"pending": 0, "processing": 0, "completed": 0, "failed": 0, "total": 0}
+
 
     # Report related operations
     async def create_report_upload_link(self, link_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
