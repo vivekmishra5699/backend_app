@@ -584,57 +584,82 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
         }
     
     def _parse_analysis_response(self, analysis_text: str) -> Dict[str, Any]:
-        """Parse the structured analysis response from Gemini"""
+        """Parse the structured analysis response from Gemini.
+        
+        OPTIMIZED: 
+        - Single .upper() call per line instead of 10+ calls
+        - Pre-defined pattern matching with early exit
+        - Uses list collection + join instead of string concatenation (O(N) vs O(N²))
+        """
         try:
-            sections = {
-                "document_summary": "",
-                "clinical_correlation": "",
-                "detailed_findings": "",
-                "critical_findings": "",
-                "treatment_evaluation": "",
-                "clinical_significance": "",
-                "correlation_with_patient": "",
-                "actionable_insights": "",
-                "patient_communication": "",
-                "clinical_notes": ""
+            # Use lists for O(N) collection instead of O(N²) string concatenation
+            section_parts = {
+                "document_summary": [],
+                "clinical_correlation": [],
+                "detailed_findings": [],
+                "critical_findings": [],
+                "treatment_evaluation": [],
+                "clinical_significance": [],
+                "correlation_with_patient": [],
+                "actionable_insights": [],
+                "patient_communication": [],
+                "clinical_notes": []
             }
             
-            # Simple parsing based on section headers
+            # Pre-defined section patterns (checked in order, first match wins)
+            # Format: (pattern_to_check, section_name, requires_secondary_check, secondary_pattern)
+            SECTION_PATTERNS = [
+                ("DOCUMENT IDENTIFICATION", "document_summary", False, None),
+                ("DOCUMENT SUMMARY", "document_summary", False, None),
+                ("CLINICAL CORRELATION WITH VISIT", "clinical_correlation", False, None),
+                ("CORRELATION WITH VISIT", "clinical_correlation", False, None),
+                ("DETAILED FINDINGS", "detailed_findings", False, None),
+                ("CRITICAL", "critical_findings", True, "URGENT"),  # Requires both CRITICAL and URGENT
+                ("TREATMENT PLAN EVALUATION", "treatment_evaluation", False, None),
+                ("CLINICAL SIGNIFICANCE", "clinical_significance", False, None),
+                ("CORRELATION WITH PATIENT", "correlation_with_patient", False, None),
+                ("ACTIONABLE", "actionable_insights", False, None),
+                ("NEXT STEPS", "actionable_insights", False, None),
+                ("PATIENT COMMUNICATION", "patient_communication", False, None),
+            ]
+            
             current_section = None
             lines = analysis_text.split('\n')
             
             for line in lines:
                 line = line.strip()
+                if not line:
+                    continue
                 
-                # Check for section headers (enhanced to match new format)
-                if "DOCUMENT IDENTIFICATION" in line.upper() or "DOCUMENT SUMMARY" in line.upper():
-                    current_section = "document_summary"
-                elif "CLINICAL CORRELATION WITH VISIT" in line.upper() or "CORRELATION WITH VISIT" in line.upper():
-                    current_section = "clinical_correlation"
-                elif "DETAILED FINDINGS" in line.upper():
-                    current_section = "detailed_findings"
-                elif "CRITICAL" in line.upper() and "URGENT" in line.upper():
-                    current_section = "critical_findings"
-                elif "TREATMENT PLAN EVALUATION" in line.upper():
-                    current_section = "treatment_evaluation"
-                elif "CLINICAL SIGNIFICANCE" in line.upper():
-                    current_section = "clinical_significance"
-                elif "CORRELATION WITH PATIENT" in line.upper():
-                    current_section = "correlation_with_patient"
-                elif "ACTIONABLE" in line.upper() or "NEXT STEPS" in line.upper():
-                    current_section = "actionable_insights"
-                elif "PATIENT COMMUNICATION" in line.upper():
-                    current_section = "patient_communication"
-                elif "CLINICAL" in line.upper() and ("NOTES" in line.upper() or "DOCUMENTATION" in line.upper()):
-                    current_section = "clinical_notes"
-                elif line and current_section and not line.startswith('**') and not line.startswith('⚠️') and not line.startswith('🚨'):
-                    # Add content to current section (skip emoji markers)
-                    clean_line = line.lstrip('✓-•*')
-                    if clean_line:
-                        if sections[current_section]:
-                            sections[current_section] += " " + clean_line
+                # OPTIMIZATION: Single .upper() call per line
+                line_upper = line.upper()
+                
+                # Check for section headers with early exit
+                matched_section = None
+                for pattern, section, requires_secondary, secondary in SECTION_PATTERNS:
+                    if pattern in line_upper:
+                        if requires_secondary:
+                            if secondary and secondary in line_upper:
+                                matched_section = section
+                                break
                         else:
-                            sections[current_section] = clean_line
+                            matched_section = section
+                            break
+                
+                # Special case for clinical notes (compound check)
+                if not matched_section and "CLINICAL" in line_upper and ("NOTES" in line_upper or "DOCUMENTATION" in line_upper):
+                    matched_section = "clinical_notes"
+                
+                if matched_section:
+                    current_section = matched_section
+                elif current_section and not line.startswith('**') and not line.startswith('⚠️') and not line.startswith('🚨'):
+                    # Add content to current section (skip emoji markers)
+                    clean_line = line.lstrip('✓-•*').strip()
+                    if clean_line:
+                        section_parts[current_section].append(clean_line)
+            
+            # OPTIMIZATION: Single join at the end instead of repeated concatenation
+            sections = {key: " ".join(parts) for key, parts in section_parts.items()}
             
             return sections
             
