@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, status, Request, File, Form, UploadFile, Body
+from fastapi import FastAPI, HTTPException, Depends, status, Request, File, Form, UploadFile, Body, Query
 from fastapi.responses import FileResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -211,7 +211,92 @@ async def lifespan(app: FastAPI):
         shutdown_thread_pool(wait=True)
         print("✅ Thread pool shut down successfully")
 
-app = FastAPI(title="Doctor App API", version="1.0.0", lifespan=lifespan)
+app = FastAPI(
+    title="Doctor App API", 
+    version="1.0.0", 
+    description="""## Doctor App Backend API
+    
+A comprehensive healthcare management API for doctors, frontdesk staff, pharmacies, and labs.
+
+### Key Features:
+- **Patient Management**: Register and manage patient profiles with detailed medical history
+- **Visit Tracking**: Create and manage patient visits with vitals, diagnosis, and prescriptions
+- **Lab Integration**: Request and receive lab reports from pathology and radiology labs
+- **AI Analysis**: Get AI-powered analysis of medical reports and patient history
+- **Pharmacy Integration**: Manage prescriptions and pharmacy orders
+
+### New: Enhanced Prior Medical History
+Patient registration now supports detailed prior medical history including:
+- Previous doctor consultations
+- Prior medications and their effectiveness
+- Previous symptoms and diagnosis
+- Reason for seeking new consultation
+""",
+    lifespan=lifespan,
+    openapi_tags=[
+        {
+            "name": "Authentication",
+            "description": "Doctor and user authentication endpoints"
+        },
+        {
+            "name": "Patients",
+            "description": "Patient registration and management with enhanced prior medical history support"
+        },
+        {
+            "name": "Visits",
+            "description": "Patient visit management including vitals, diagnosis, and treatment"
+        },
+        {
+            "name": "Frontdesk",
+            "description": "Frontdesk operations for hospital staff"
+        },
+        {
+            "name": "Pharmacy",
+            "description": "Pharmacy integration and prescription management"
+        },
+        {
+            "name": "Lab",
+            "description": "Lab report requests and uploads"
+        },
+        {
+            "name": "AI Analysis",
+            "description": "AI-powered medical analysis endpoints"
+        },
+        {
+            "name": "Prescriptions",
+            "description": """Prescription management including standard and empirical prescriptions.
+            
+### Prescription Types:
+- **General**: Standard prescriptions based on complete diagnosis
+- **Empirical**: Initial prescriptions given before lab/test results are available
+- **Follow-up**: Updated prescriptions after reviewing test results
+
+### Empirical Prescriptions:
+Empirical prescriptions include a disclaimer that the prescription may be modified based on:
+- Laboratory test results
+- Diagnostic imaging reports
+- Further clinical investigation
+- Follow-up examination findings
+"""
+        },
+        {
+            "name": "Calendar",
+            "description": "Appointment calendar and follow-up management"
+        },
+        {
+            "name": "Billing",
+            "description": "Earnings, billing, and payment tracking"
+        },
+        {
+            "name": "Templates",
+            "description": "PDF prescription template management"
+        },
+        {
+            "name": "Notifications",
+            "description": "Doctor notifications and alerts"
+        }
+    ]
+)
 
 # CORS middleware for Flutter app
 app.add_middleware(
@@ -644,6 +729,96 @@ class HospitalDashboardResponse(BaseModel):
     doctors: List[DoctorWithPatientCount]
     recent_patients: List[PatientWithDoctorInfo]
 
+# Prior Medical History Model - Detailed medical history from previous consultations
+class PriorMedicalHistory(BaseModel):
+    """Detailed prior medical history for patients who have consulted other doctors.
+    
+    This model captures comprehensive information about a patient's previous medical consultations,
+    including the treating doctor, diagnosis, medications prescribed, and their response to treatment.
+    This helps the current doctor understand the patient's medical journey and make informed decisions.
+    """
+    consulted_other_doctor: bool = Field(
+        default=False,
+        description="Whether the patient has consulted another doctor for the current condition before coming here"
+    )
+    previous_doctor_name: Optional[str] = Field(
+        default=None,
+        description="Full name of the previous doctor consulted (e.g., 'Dr. Sharma')"
+    )
+    previous_doctor_specialization: Optional[str] = Field(
+        default=None,
+        description="Specialization of the previous doctor (e.g., 'General Physician', 'Cardiologist')"
+    )
+    previous_clinic_hospital: Optional[str] = Field(
+        default=None,
+        description="Name of the clinic or hospital where the patient was previously treated"
+    )
+    previous_consultation_date: Optional[str] = Field(
+        default=None,
+        description="Date of the previous consultation in YYYY-MM-DD format"
+    )
+    previous_symptoms: Optional[str] = Field(
+        default=None,
+        description="Symptoms the patient presented with at the previous consultation"
+    )
+    previous_diagnosis: Optional[str] = Field(
+        default=None,
+        description="Diagnosis given by the previous doctor"
+    )
+    previous_medications: Optional[List[str]] = Field(
+        default=None,
+        description="List of medications prescribed by the previous doctor (e.g., ['Paracetamol 500mg', 'Cetirizine 10mg'])"
+    )
+    previous_medications_duration: Optional[str] = Field(
+        default=None,
+        description="Duration for which previous medications were prescribed (e.g., '5 days', '2 weeks')"
+    )
+    medication_response: Optional[str] = Field(
+        default=None,
+        description="Patient's response to previous medications. Allowed values: 'improved', 'partial improvement', 'no change', 'worsened'"
+    )
+    previous_tests_done: Optional[str] = Field(
+        default=None,
+        description="Medical tests performed during previous consultation (e.g., 'CBC, Dengue NS1, X-ray chest')"
+    )
+    previous_test_results: Optional[str] = Field(
+        default=None,
+        description="Results of the previous tests (e.g., 'CBC normal, Dengue negative')"
+    )
+    reason_for_new_consultation: Optional[str] = Field(
+        default=None,
+        description="Why the patient is seeking a new consultation (e.g., 'no improvement', 'second opinion', 'symptoms worsened')"
+    )
+    ongoing_treatment: bool = Field(
+        default=False,
+        description="Whether the patient is currently on any ongoing treatment"
+    )
+    current_medications: Optional[List[str]] = Field(
+        default=None,
+        description="List of medications the patient is currently taking"
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "consulted_other_doctor": True,
+                "previous_doctor_name": "Dr. Sharma",
+                "previous_doctor_specialization": "General Physician",
+                "previous_clinic_hospital": "City Hospital",
+                "previous_consultation_date": "2026-01-01",
+                "previous_symptoms": "Fever, headache, body ache",
+                "previous_diagnosis": "Viral fever",
+                "previous_medications": ["Paracetamol 500mg", "Cetirizine 10mg"],
+                "previous_medications_duration": "5 days",
+                "medication_response": "partial improvement",
+                "previous_tests_done": "CBC, Dengue NS1",
+                "previous_test_results": "CBC normal, Dengue negative",
+                "reason_for_new_consultation": "Symptoms persisting after medication",
+                "ongoing_treatment": True,
+                "current_medications": ["Paracetamol 500mg"]
+            }
+        }
+
 # Frontdesk Patient Registration Model
 class FrontdeskPatientRegister(BaseModel):
     first_name: str
@@ -659,6 +834,8 @@ class FrontdeskPatientRegister(BaseModel):
     allergies: Optional[str] = None
     medical_history: Optional[str] = None
     doctor_firebase_uid: str  # The selected doctor for this patient
+    # Detailed prior medical history fields
+    prior_medical_history: Optional[PriorMedicalHistory] = None
     
     class Config:
         json_schema_extra = {
@@ -675,7 +852,15 @@ class FrontdeskPatientRegister(BaseModel):
                 "blood_group": "O+",
                 "allergies": "None",
                 "medical_history": "No significant medical history",
-                "doctor_firebase_uid": "doctor_firebase_uid_here"
+                "doctor_firebase_uid": "doctor_firebase_uid_here",
+                "prior_medical_history": {
+                    "consulted_other_doctor": True,
+                    "previous_doctor_name": "Dr. Sharma",
+                    "previous_symptoms": "Fever and cold",
+                    "previous_diagnosis": "Viral infection",
+                    "previous_medications": ["Paracetamol 500mg"],
+                    "medication_response": "partial improvement"
+                }
             }
         }
 
@@ -829,7 +1014,9 @@ class PatientRegister(BaseModel):
     emergency_contact_phone: Optional[str] = None
     blood_group: Optional[str] = None
     allergies: Optional[str] = None
-    medical_history: Optional[str] = None
+    medical_history: Optional[str] = None  # General medical history notes
+    # Detailed prior medical history fields
+    prior_medical_history: Optional[PriorMedicalHistory] = None
     
     class Config:
         str_strip_whitespace = True
@@ -847,6 +1034,8 @@ class PatientUpdate(BaseModel):
     blood_group: Optional[str] = None
     allergies: Optional[str] = None
     medical_history: Optional[str] = None
+    # Detailed prior medical history fields
+    prior_medical_history: Optional[PriorMedicalHistory] = None
 
 class PatientProfile(BaseModel):
     id: int
@@ -862,6 +1051,22 @@ class PatientProfile(BaseModel):
     blood_group: Optional[str]
     allergies: Optional[str]
     medical_history: Optional[str]
+    # Detailed prior medical history fields
+    consulted_other_doctor: Optional[bool] = None
+    previous_doctor_name: Optional[str] = None
+    previous_doctor_specialization: Optional[str] = None
+    previous_clinic_hospital: Optional[str] = None
+    previous_consultation_date: Optional[str] = None
+    previous_symptoms: Optional[str] = None
+    previous_diagnosis: Optional[str] = None
+    previous_medications: Optional[List[str]] = None
+    previous_medications_duration: Optional[str] = None
+    medication_response: Optional[str] = None
+    previous_tests_done: Optional[str] = None
+    previous_test_results: Optional[str] = None
+    reason_for_new_consultation: Optional[str] = None
+    ongoing_treatment: Optional[bool] = None
+    current_medications: Optional[List[str]] = None
     created_at: str
     updated_at: str
     created_by_doctor: str
@@ -870,15 +1075,108 @@ class PatientProfile(BaseModel):
 
 # Visit Models
 class Vitals(BaseModel):
-    temperature: Optional[float] = None  # in Celsius
-    blood_pressure_systolic: Optional[int] = None
-    blood_pressure_diastolic: Optional[int] = None
-    heart_rate: Optional[int] = None  # BPM
-    respiratory_rate: Optional[int] = None
-    oxygen_saturation: Optional[float] = None  # percentage
-    weight: Optional[float] = None  # in kg
-    height: Optional[float] = None  # in cm
-    bmi: Optional[float] = None
+    """Patient vital signs recorded during a visit.
+    
+    Contains all standard vital measurements including temperature, blood pressure,
+    heart rate, pulse rate, respiratory rate, oxygen saturation, and body measurements.
+    """
+    temperature: Optional[float] = Field(
+        default=None,
+        description="Body temperature in Celsius (e.g., 37.5)",
+        ge=30.0,
+        le=45.0
+    )
+    blood_pressure_systolic: Optional[int] = Field(
+        default=None,
+        description="Systolic blood pressure in mmHg (e.g., 120)",
+        ge=50,
+        le=300
+    )
+    blood_pressure_diastolic: Optional[int] = Field(
+        default=None,
+        description="Diastolic blood pressure in mmHg (e.g., 80)",
+        ge=30,
+        le=200
+    )
+    heart_rate: Optional[int] = Field(
+        default=None,
+        description="Heart rate in beats per minute (BPM), measured via auscultation or ECG",
+        ge=20,
+        le=300
+    )
+    pulse_rate: Optional[int] = Field(
+        default=None,
+        description="Pulse rate in beats per minute (BPM), measured at wrist or other peripheral artery. May differ from heart rate in conditions like atrial fibrillation.",
+        ge=20,
+        le=300
+    )
+    respiratory_rate: Optional[int] = Field(
+        default=None,
+        description="Respiratory rate in breaths per minute",
+        ge=5,
+        le=60
+    )
+    oxygen_saturation: Optional[float] = Field(
+        default=None,
+        description="Oxygen saturation (SpO2) as percentage (e.g., 98.5)",
+        ge=50.0,
+        le=100.0
+    )
+    weight: Optional[float] = Field(
+        default=None,
+        description="Patient weight in kilograms (kg)",
+        ge=0.5,
+        le=500.0
+    )
+    height: Optional[float] = Field(
+        default=None,
+        description="Patient height in centimeters (cm)",
+        ge=20.0,
+        le=300.0
+    )
+    bmi: Optional[float] = Field(
+        default=None,
+        description="Body Mass Index (BMI) - calculated as weight(kg) / height(m)²",
+        ge=5.0,
+        le=100.0
+    )
+    waist_circumference: Optional[float] = Field(
+        default=None,
+        description="Waist circumference in centimeters (cm), measured at the narrowest part of the waist",
+        ge=20.0,
+        le=300.0
+    )
+    hip_circumference: Optional[float] = Field(
+        default=None,
+        description="Hip circumference in centimeters (cm), measured at the widest part of the hip",
+        ge=20.0,
+        le=300.0
+    )
+    waist_to_hip_ratio: Optional[float] = Field(
+        default=None,
+        description="Waist-to-Hip Ratio (WHR) - calculated as waist circumference (cm) / hip circumference (cm). Used to assess abdominal obesity and health risks. Normal: <0.85 (female), <0.90 (male)",
+        ge=0.3,
+        le=2.0
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "temperature": 37.2,
+                "blood_pressure_systolic": 120,
+                "blood_pressure_diastolic": 80,
+                "heart_rate": 72,
+                "pulse_rate": 72,
+                "respiratory_rate": 16,
+                "oxygen_saturation": 98.0,
+                "weight": 70.5,
+                "height": 175.0,
+                "bmi": 23.0,
+                "waist_circumference": 80.0,
+                "hip_circumference": 95.0,
+                "waist_to_hip_ratio": 0.84
+            }
+        }
 
 class VisitCreate(BaseModel):
     patient_id: int
@@ -1091,11 +1389,58 @@ class HandwrittenVisitNote(BaseModel):
     sent_via_whatsapp: bool = False
     whatsapp_message_id: Optional[str] = None
     is_active: bool = True
+    # Prescription type fields
+    note_type: Optional[str] = "handwritten"  # handwritten, typed
+    prescription_type: Optional[str] = None  # general, empirical, follow_up
 
 class HandwrittenNoteRequest(BaseModel):
     template_id: int
     send_whatsapp: bool = True
     custom_message: Optional[str] = None
+
+class EmpiricalPrescriptionRequest(BaseModel):
+    """Request model for uploading an empirical prescription.
+    
+    Empirical prescriptions are initial prescriptions given based on clinical 
+    assessment before lab results/diagnostic tests are available. They include
+    a disclaimer that the prescription may be modified based on test results.
+    """
+    template_id: Optional[int] = Field(
+        default=None,
+        description="ID of the PDF template to use for the prescription"
+    )
+    send_whatsapp: bool = Field(
+        default=True,
+        description="Whether to send the prescription via WhatsApp to the patient"
+    )
+    custom_message: Optional[str] = Field(
+        default=None,
+        description="Optional custom message to include with the WhatsApp message"
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "template_id": 1,
+                "send_whatsapp": True,
+                "custom_message": "Please start this medication immediately and return after tests are done."
+            }
+        }
+
+# Empirical Prescription Disclaimer
+EMPIRICAL_PRESCRIPTION_DISCLAIMER = """
+⚠️ IMPORTANT NOTICE - EMPIRICAL PRESCRIPTION ⚠️
+
+This is an empirical (initial) prescription based on clinical assessment.
+This prescription may be MODIFIED or CHANGED based on:
+• Laboratory test results
+• Diagnostic imaging reports  
+• Further clinical investigation
+• Follow-up examination findings
+
+Please complete the recommended tests and return for follow-up.
+Do not discontinue or modify medications without consulting your doctor.
+"""
 
 class TemplateSelectionRequest(BaseModel):
     template_id: int
@@ -1392,7 +1737,14 @@ async def get_current_pharmacy_user(pharmacy_id: int) -> Dict[str, Any]:
         )
 
 # API Routes with database manager
-@app.post("/register", response_model=dict)
+@app.post(
+    "/doctors", 
+    response_model=dict, 
+    status_code=status.HTTP_201_CREATED,
+    tags=["Authentication"],
+    summary="Register a new doctor",
+    description="Create a new doctor account with Firebase authentication"
+)
 async def register_doctor(doctor: DoctorRegister):
     firebase_user = None
     try:
@@ -1691,7 +2043,13 @@ async def update_doctor_profile(
             detail="Failed to update profile"
         )
 
-@app.post("/profile/toggle-ai", response_model=dict)
+@app.patch(
+    "/profile/ai-enabled", 
+    response_model=dict,
+    tags=["Authentication"],
+    summary="Toggle AI analysis setting",
+    description="Enable or disable AI-powered analysis for the doctor's patients"
+)
 async def toggle_ai_setting(
     current_doctor = Depends(get_current_doctor)
 ):
@@ -2403,7 +2761,7 @@ async def get_pharmacy_prescription(pharmacy_id: int, prescription_id: int):
     return map_prescription_to_view(prescription)
 
 
-@app.post("/pharmacy/{pharmacy_id}/prescriptions/{prescription_id}/claim", response_model=dict)
+@app.patch("/pharmacy/{pharmacy_id}/prescriptions/{prescription_id}/claim", response_model=dict)
 async def claim_pharmacy_prescription(pharmacy_id: int, prescription_id: int):
     pharmacy_user = await get_current_pharmacy_user(pharmacy_id)
     prescription = await db.get_pharmacy_prescription_by_id(prescription_id)
@@ -2426,7 +2784,7 @@ async def claim_pharmacy_prescription(pharmacy_id: int, prescription_id: int):
     return {"message": "Prescription claimed successfully"}
 
 
-@app.post("/pharmacy/{pharmacy_id}/prescriptions/{prescription_id}/status", response_model=dict)
+@app.patch("/pharmacy/{pharmacy_id}/prescriptions/{prescription_id}/status", response_model=dict)
 async def update_pharmacy_prescription_status(
     pharmacy_id: int,
     prescription_id: int,
@@ -3316,7 +3674,38 @@ async def get_hospital_dashboard(frontdesk_id: int):
             detail="Failed to fetch hospital dashboard"
         )
 
-@app.post("/frontdesk/{frontdesk_id}/register-patient", response_model=dict)
+@app.post(
+    "/frontdesk/{frontdesk_id}/register-patient", 
+    response_model=dict,
+    tags=["Frontdesk", "Patients"],
+    summary="Register a new patient by frontdesk staff",
+    description="""Register a new patient by frontdesk staff with doctor assignment.
+    
+## Prior Medical History Support
+
+This endpoint now supports capturing detailed prior medical history when a patient has previously consulted another doctor. This is especially useful for frontdesk staff during patient intake.
+
+### Fields Available in prior_medical_history:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| consulted_other_doctor | boolean | Whether patient consulted another doctor |
+| previous_doctor_name | string | Name of the previous doctor |
+| previous_doctor_specialization | string | Specialization of previous doctor |
+| previous_clinic_hospital | string | Previous clinic/hospital name |
+| previous_consultation_date | string | Date in YYYY-MM-DD format |
+| previous_symptoms | string | Symptoms at previous visit |
+| previous_diagnosis | string | Diagnosis by previous doctor |
+| previous_medications | array | List of prescribed medications |
+| previous_medications_duration | string | Duration of medication |
+| medication_response | string | Response: improved/partial improvement/no change/worsened |
+| previous_tests_done | string | Tests performed previously |
+| previous_test_results | string | Results of previous tests |
+| reason_for_new_consultation | string | Why seeking new consultation |
+| ongoing_treatment | boolean | Currently on treatment |
+| current_medications | array | Current medications being taken |
+"""
+)
 async def register_patient_by_frontdesk(frontdesk_id: int, patient: FrontdeskPatientRegister):
     """Register a new patient by frontdesk staff with doctor assignment"""
     try:
@@ -3398,6 +3787,41 @@ async def register_patient_by_frontdesk(frontdesk_id: int, patient: FrontdeskPat
             patient_data["allergies"] = patient.allergies
         if patient.medical_history:
             patient_data["medical_history"] = patient.medical_history
+        
+        # Add prior medical history fields if provided
+        if patient.prior_medical_history:
+            pmh = patient.prior_medical_history
+            patient_data["consulted_other_doctor"] = pmh.consulted_other_doctor
+            
+            if pmh.previous_doctor_name:
+                patient_data["previous_doctor_name"] = pmh.previous_doctor_name
+            if pmh.previous_doctor_specialization:
+                patient_data["previous_doctor_specialization"] = pmh.previous_doctor_specialization
+            if pmh.previous_clinic_hospital:
+                patient_data["previous_clinic_hospital"] = pmh.previous_clinic_hospital
+            if pmh.previous_consultation_date:
+                patient_data["previous_consultation_date"] = pmh.previous_consultation_date
+            if pmh.previous_symptoms:
+                patient_data["previous_symptoms"] = pmh.previous_symptoms
+            if pmh.previous_diagnosis:
+                patient_data["previous_diagnosis"] = pmh.previous_diagnosis
+            if pmh.previous_medications:
+                patient_data["previous_medications"] = pmh.previous_medications  # Will be stored as JSONB
+            if pmh.previous_medications_duration:
+                patient_data["previous_medications_duration"] = pmh.previous_medications_duration
+            if pmh.medication_response:
+                # Normalize to lowercase to match database check constraint
+                patient_data["medication_response"] = pmh.medication_response.lower()
+            if pmh.previous_tests_done:
+                patient_data["previous_tests_done"] = pmh.previous_tests_done
+            if pmh.previous_test_results:
+                patient_data["previous_test_results"] = pmh.previous_test_results
+            if pmh.reason_for_new_consultation:
+                patient_data["reason_for_new_consultation"] = pmh.reason_for_new_consultation
+            
+            patient_data["ongoing_treatment"] = pmh.ongoing_treatment
+            if pmh.current_medications:
+                patient_data["current_medications"] = pmh.current_medications  # Will be stored as JSONB
         
         print(f"Creating patient with data: {patient_data}")
         
@@ -4071,7 +4495,45 @@ async def root():
     return HTMLResponse(content=html_content, status_code=200)
 
 # Patient Routes using database manager
-@app.post("/patients/register", response_model=dict)
+@app.post(
+    "/patients/register", 
+    response_model=dict,
+    tags=["Patients"],
+    summary="Register a new patient",
+    description="""Register a new patient under the authenticated doctor.
+    
+## Prior Medical History Support
+
+This endpoint now supports capturing detailed prior medical history when a patient has previously consulted another doctor. Include the `prior_medical_history` object to record:
+
+- **Previous Doctor Details**: Name, specialization, clinic/hospital
+- **Previous Consultation**: Date, symptoms, diagnosis
+- **Previous Treatment**: Medications, duration, patient's response
+- **Previous Tests**: Tests done and their results
+- **Current Status**: Ongoing treatment and current medications
+- **Reason for Visit**: Why seeking new consultation
+
+## Example with Prior Medical History
+
+```json
+{
+    "first_name": "John",
+    "last_name": "Doe",
+    "phone": "9876543210",
+    "date_of_birth": "1990-05-15",
+    "gender": "Male",
+    "prior_medical_history": {
+        "consulted_other_doctor": true,
+        "previous_doctor_name": "Dr. Sharma",
+        "previous_diagnosis": "Viral fever",
+        "previous_medications": ["Paracetamol 500mg"],
+        "medication_response": "partial improvement",
+        "reason_for_new_consultation": "Symptoms persisting"
+    }
+}
+```
+"""
+)
 async def register_patient(patient: PatientRegister, current_doctor = Depends(get_current_doctor)):
     try:
         print(f"=== PATIENT REGISTRATION START ===")
@@ -4112,6 +4574,41 @@ async def register_patient(patient: PatientRegister, current_doctor = Depends(ge
             value = getattr(patient, field)
             if value:
                 patient_data[field] = value
+        
+        # Add prior medical history fields if provided
+        if patient.prior_medical_history:
+            pmh = patient.prior_medical_history
+            patient_data["consulted_other_doctor"] = pmh.consulted_other_doctor
+            
+            if pmh.previous_doctor_name:
+                patient_data["previous_doctor_name"] = pmh.previous_doctor_name
+            if pmh.previous_doctor_specialization:
+                patient_data["previous_doctor_specialization"] = pmh.previous_doctor_specialization
+            if pmh.previous_clinic_hospital:
+                patient_data["previous_clinic_hospital"] = pmh.previous_clinic_hospital
+            if pmh.previous_consultation_date:
+                patient_data["previous_consultation_date"] = pmh.previous_consultation_date
+            if pmh.previous_symptoms:
+                patient_data["previous_symptoms"] = pmh.previous_symptoms
+            if pmh.previous_diagnosis:
+                patient_data["previous_diagnosis"] = pmh.previous_diagnosis
+            if pmh.previous_medications:
+                patient_data["previous_medications"] = pmh.previous_medications  # Will be stored as JSONB
+            if pmh.previous_medications_duration:
+                patient_data["previous_medications_duration"] = pmh.previous_medications_duration
+            if pmh.medication_response:
+                # Normalize to lowercase to match database check constraint
+                patient_data["medication_response"] = pmh.medication_response.lower()
+            if pmh.previous_tests_done:
+                patient_data["previous_tests_done"] = pmh.previous_tests_done
+            if pmh.previous_test_results:
+                patient_data["previous_test_results"] = pmh.previous_test_results
+            if pmh.reason_for_new_consultation:
+                patient_data["reason_for_new_consultation"] = pmh.reason_for_new_consultation
+            
+            patient_data["ongoing_treatment"] = pmh.ongoing_treatment
+            if pmh.current_medications:
+                patient_data["current_medications"] = pmh.current_medications  # Will be stored as JSONB
         
         # Create patient using database manager
         created_patient = await db.create_patient(patient_data)
@@ -4210,6 +4707,42 @@ async def update_patient_profile(
             detail="No fields to update"
         )
     
+    # Handle prior_medical_history - unpack into individual columns
+    if "prior_medical_history" in update_data:
+        pmh = update_data.pop("prior_medical_history")
+        if pmh:
+            update_data["consulted_other_doctor"] = pmh.get("consulted_other_doctor", False)
+            
+            if pmh.get("previous_doctor_name"):
+                update_data["previous_doctor_name"] = pmh["previous_doctor_name"]
+            if pmh.get("previous_doctor_specialization"):
+                update_data["previous_doctor_specialization"] = pmh["previous_doctor_specialization"]
+            if pmh.get("previous_clinic_hospital"):
+                update_data["previous_clinic_hospital"] = pmh["previous_clinic_hospital"]
+            if pmh.get("previous_consultation_date"):
+                update_data["previous_consultation_date"] = pmh["previous_consultation_date"]
+            if pmh.get("previous_symptoms"):
+                update_data["previous_symptoms"] = pmh["previous_symptoms"]
+            if pmh.get("previous_diagnosis"):
+                update_data["previous_diagnosis"] = pmh["previous_diagnosis"]
+            if pmh.get("previous_medications"):
+                update_data["previous_medications"] = pmh["previous_medications"]
+            if pmh.get("previous_medications_duration"):
+                update_data["previous_medications_duration"] = pmh["previous_medications_duration"]
+            if pmh.get("medication_response"):
+                # Normalize to lowercase to match database check constraint
+                update_data["medication_response"] = pmh["medication_response"].lower()
+            if pmh.get("previous_tests_done"):
+                update_data["previous_tests_done"] = pmh["previous_tests_done"]
+            if pmh.get("previous_test_results"):
+                update_data["previous_test_results"] = pmh["previous_test_results"]
+            if pmh.get("reason_for_new_consultation"):
+                update_data["reason_for_new_consultation"] = pmh["reason_for_new_consultation"]
+            
+            update_data["ongoing_treatment"] = pmh.get("ongoing_treatment", False)
+            if pmh.get("current_medications"):
+                update_data["current_medications"] = pmh["current_medications"]
+    
     # Validate gender if provided
     if "gender" in update_data:
         valid_genders = ["Male", "Female", "Other"]
@@ -4232,7 +4765,13 @@ async def update_patient_profile(
         )
        
 
-@app.get("/patients/{patient_id}/profile", response_model=PatientWithVisits)
+@app.get(
+    "/patients/{patient_id}/with-visits", 
+    response_model=PatientWithVisits,
+    tags=["Patients"],
+    summary="Get patient with all visits",
+    description="Get complete patient profile including all their visits. Use GET /patients/{id} for basic profile only."
+)
 async def get_patient_complete_profile(patient_id: int, current_doctor = Depends(get_current_doctor)):
     # Get patient basic info
     patient = await db.get_patient_by_id(patient_id, current_doctor["firebase_uid"])
@@ -5246,13 +5785,35 @@ async def get_handwriting_template_for_visit(
             detail=f"Failed to get handwriting template: {str(e)}"
         )
 
-@app.post("/visits/{visit_id}/upload-handwritten-pdf", response_model=dict)
+@app.post(
+    "/visits/{visit_id}/upload-handwritten-pdf", 
+    response_model=dict,
+    tags=["Visits", "Prescriptions"],
+    summary="Upload a handwritten prescription/note",
+    description="""Upload a handwritten PDF prescription or note for a visit.
+
+### Prescription Types:
+- **general** (default): Standard prescription
+- **empirical**: Initial prescription before test results (includes disclaimer)
+- **follow_up**: Prescription after reviewing test results
+
+### Form Data:
+- **file**: PDF file (required)
+- **send_whatsapp**: Send via WhatsApp (default: true)
+- **custom_message**: Custom message for WhatsApp
+- **prescription_type**: Type of prescription (default: general)
+
+### Empirical Prescriptions:
+When `prescription_type=empirical`, the prescription includes a disclaimer that it may be 
+modified based on test results. The WhatsApp message will include this disclaimer.
+"""
+)
 async def upload_handwritten_pdf(
     visit_id: int,
     request: Request,
     current_doctor = Depends(get_current_doctor)
 ):
-    """Upload the completed handwritten PDF for a visit (works for any visit type)"""
+    """Upload the completed handwritten PDF for a visit with optional prescription type"""
     try:
         # Check if visit exists and belongs to current doctor
         visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
@@ -5267,6 +5828,7 @@ async def upload_handwritten_pdf(
         files = form.getlist("file")
         send_whatsapp = form.get("send_whatsapp", "true").lower() == "true"
         custom_message = form.get("custom_message", "")
+        prescription_type = form.get("prescription_type", "general")  # general, empirical, follow_up
         
         if not files or len(files) == 0:
             raise HTTPException(
@@ -5300,12 +5862,20 @@ async def upload_handwritten_pdf(
                 detail="File is too large. Maximum size is 50MB."
             )
         
-        # Generate unique filename
+        # Generate unique filename based on prescription type
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        unique_filename = f"handwritten_visit_{visit_id}_{timestamp}.pdf"
+        if prescription_type == "empirical":
+            unique_filename = f"empirical_prescription_{visit_id}_{timestamp}.pdf"
+            storage_folder = "empirical_prescriptions"
+        elif prescription_type == "follow_up":
+            unique_filename = f"followup_prescription_{visit_id}_{timestamp}.pdf"
+            storage_folder = "followup_prescriptions"
+        else:  # general
+            unique_filename = f"handwritten_visit_{visit_id}_{timestamp}.pdf"
+            storage_folder = "handwritten_notes"
         
         # Upload file to Supabase Storage
-        storage_path = f"handwritten_notes/{current_doctor['firebase_uid']}/{unique_filename}"
+        storage_path = f"{storage_folder}/{current_doctor['firebase_uid']}/{unique_filename}"
         
         try:
             # Use async storage methods directly (not run_in_executor)
@@ -5357,6 +5927,8 @@ async def upload_handwritten_pdf(
             "handwritten_pdf_filename": unique_filename,
             "handwritten_pdf_size": file_size,
             "storage_path": storage_path,
+            "note_type": "handwritten",
+            "prescription_type": prescription_type if prescription_type != "general" else None,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
@@ -5366,15 +5938,17 @@ async def upload_handwritten_pdf(
             print("Warning: Failed to create handwritten note record, but file was uploaded successfully")
         
         response_data = {
-            "message": "Handwritten PDF uploaded successfully",
+            "message": f"{prescription_type.capitalize()} prescription uploaded successfully" if prescription_type != "general" else "Handwritten PDF uploaded successfully",
             "visit_id": visit_id,
             "file_url": file_url,
             "file_name": unique_filename,
             "file_size": file_size,
+            "prescription_type": prescription_type,
             "template_used": template["template_name"] if template else "Unknown",
             "note_id": created_note["id"] if created_note else None,
             "whatsapp_sent": False,
             "whatsapp_error": None,
+            "disclaimer_included": prescription_type == "empirical",
             "ai_analysis_available": True,
             "ai_analysis_endpoint": f"/handwritten-notes/{created_note['id']}/analyze" if created_note else None
         }
@@ -5387,14 +5961,25 @@ async def upload_handwritten_pdf(
             patient = await db.get_patient_by_id(visit["patient_id"], current_doctor["firebase_uid"])
             if patient and patient.get("phone"):
                 try:
-                    whatsapp_result = await whatsapp_service.send_handwritten_visit_note(
-                        patient_name=f"{patient['first_name']} {patient['last_name']}",
-                        doctor_name=f"Dr. {current_doctor['first_name']} {current_doctor['last_name']}",
-                        phone_number=patient["phone"],
-                        pdf_url=file_url,
-                        visit_date=visit["visit_date"],
-                        custom_message=custom_message
-                    )
+                    # Use appropriate WhatsApp method based on prescription type
+                    if prescription_type == "empirical":
+                        whatsapp_result = await whatsapp_service.send_empirical_prescription(
+                            patient_name=f"{patient['first_name']} {patient['last_name']}",
+                            doctor_name=f"Dr. {current_doctor['first_name']} {current_doctor['last_name']}",
+                            phone_number=patient["phone"],
+                            pdf_url=file_url,
+                            visit_date=visit["visit_date"],
+                            custom_message=custom_message
+                        )
+                    else:
+                        whatsapp_result = await whatsapp_service.send_handwritten_visit_note(
+                            patient_name=f"{patient['first_name']} {patient['last_name']}",
+                            doctor_name=f"Dr. {current_doctor['first_name']} {current_doctor['last_name']}",
+                            phone_number=patient["phone"],
+                            pdf_url=file_url,
+                            visit_date=visit["visit_date"],
+                            custom_message=custom_message
+                        )
                     
                     if whatsapp_result["success"]:
                         response_data["whatsapp_sent"] = True
@@ -5431,12 +6016,29 @@ async def upload_handwritten_pdf(
             detail=f"Failed to upload handwritten PDF: {str(e)}"
         )
 
-@app.get("/visits/{visit_id}/handwritten-notes", response_model=List[HandwrittenVisitNote])
+
+@app.get(
+    "/visits/{visit_id}/handwritten-notes", 
+    response_model=List[HandwrittenVisitNote],
+    tags=["Visits", "Prescriptions"],
+    summary="Get handwritten notes for a visit",
+    description="""Get all handwritten notes/prescriptions for a specific visit.
+
+Use the `prescription_type` filter to get specific types:
+- `empirical` - Initial prescriptions before test results
+- `general` - Standard prescriptions
+- `follow_up` - Follow-up prescriptions after test results
+"""
+)
 async def get_visit_handwritten_notes(
-    visit_id: int, 
+    visit_id: int,
+    prescription_type: Optional[str] = Query(
+        default=None,
+        description="Filter by prescription type: 'empirical', 'general', or 'follow_up'"
+    ),
     current_doctor = Depends(get_current_doctor)
 ):
-    """Get all handwritten notes for a specific visit"""
+    """Get all handwritten notes for a specific visit with optional filtering"""
     try:
         # Check if visit exists and belongs to current doctor
         visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
@@ -5447,6 +6049,11 @@ async def get_visit_handwritten_notes(
             )
         
         notes = await db.get_handwritten_visit_notes_by_visit_id(visit_id, current_doctor["firebase_uid"])
+        
+        # Filter by prescription_type if provided
+        if prescription_type:
+            notes = [n for n in notes if n.get("prescription_type") == prescription_type]
+        
         return [HandwrittenVisitNote(**note) for note in notes]
         
     except HTTPException:
@@ -5457,6 +6064,7 @@ async def get_visit_handwritten_notes(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get handwritten notes: {str(e)}"
         )
+
 
 @app.get("/patients/{patient_id}/handwritten-notes", response_model=List[HandwrittenVisitNote])
 async def get_patient_handwritten_notes(
@@ -5483,6 +6091,249 @@ async def get_patient_handwritten_notes(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get patient handwritten notes: {str(e)}"
+        )
+
+
+@app.get(
+    "/visits/{visit_id}/prescriptions/empirical",
+    response_model=List[HandwrittenVisitNote],
+    tags=["Prescriptions", "Visits"],
+    summary="Get empirical prescriptions for a visit",
+    description="Get all empirical (initial) prescriptions for a visit - prescriptions given before test results"
+)
+async def get_visit_empirical_prescriptions(
+    visit_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """Get empirical prescriptions for a specific visit"""
+    try:
+        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        notes = await db.get_handwritten_visit_notes_by_visit_id(visit_id, current_doctor["firebase_uid"])
+        empirical_notes = [n for n in notes if n.get("prescription_type") == "empirical"]
+        
+        return [HandwrittenVisitNote(**note) for note in empirical_notes]
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting empirical prescriptions: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get empirical prescriptions: {str(e)}"
+        )
+
+
+@app.get(
+    "/visits/{visit_id}/prescriptions/general",
+    response_model=List[HandwrittenVisitNote],
+    tags=["Prescriptions", "Visits"],
+    summary="Get general prescriptions for a visit",
+    description="Get all general (standard) prescriptions for a visit"
+)
+async def get_visit_general_prescriptions(
+    visit_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """Get general prescriptions for a specific visit"""
+    try:
+        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        notes = await db.get_handwritten_visit_notes_by_visit_id(visit_id, current_doctor["firebase_uid"])
+        # General prescriptions have prescription_type as None or "general"
+        general_notes = [n for n in notes if n.get("prescription_type") in (None, "general")]
+        
+        return [HandwrittenVisitNote(**note) for note in general_notes]
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting general prescriptions: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get general prescriptions: {str(e)}"
+        )
+
+
+@app.get(
+    "/visits/{visit_id}/prescriptions/remote",
+    response_model=List[dict],
+    tags=["Prescriptions", "Visits"],
+    summary="Get remote prescriptions for a visit",
+    description="Get all prescriptions sent remotely (via WhatsApp without in-person visit)"
+)
+async def get_visit_remote_prescriptions(
+    visit_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """Get remote prescriptions sent for a specific visit"""
+    try:
+        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        # Get all notes that were sent via WhatsApp
+        notes = await db.get_handwritten_visit_notes_by_visit_id(visit_id, current_doctor["firebase_uid"])
+        remote_notes = [n for n in notes if n.get("sent_via_whatsapp") is True]
+        
+        # Format response with focus on WhatsApp delivery info
+        remote_prescriptions = []
+        for note in remote_notes:
+            remote_prescriptions.append({
+                "id": note["id"],
+                "visit_id": note["visit_id"],
+                "prescription_type": note.get("prescription_type") or "general",
+                "file_url": note["handwritten_pdf_url"],
+                "file_name": note["handwritten_pdf_filename"],
+                "sent_via_whatsapp": True,
+                "whatsapp_message_id": note.get("whatsapp_message_id"),
+                "sent_at": note.get("updated_at"),
+                "created_at": note["created_at"]
+            })
+        
+        return remote_prescriptions
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting remote prescriptions: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get remote prescriptions: {str(e)}"
+        )
+
+
+@app.get(
+    "/patients/{patient_id}/prescriptions/empirical",
+    response_model=List[HandwrittenVisitNote],
+    tags=["Prescriptions"],
+    summary="Get all empirical prescriptions for a patient",
+    description="Get all empirical prescriptions across all patient visits"
+)
+async def get_patient_empirical_prescriptions(
+    patient_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """Get all empirical prescriptions for a patient"""
+    try:
+        patient = await db.get_patient_by_id(patient_id, current_doctor["firebase_uid"])
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        notes = await db.get_handwritten_visit_notes_by_patient_id(patient_id, current_doctor["firebase_uid"])
+        empirical_notes = [n for n in notes if n.get("prescription_type") == "empirical"]
+        
+        return [HandwrittenVisitNote(**note) for note in empirical_notes]
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting patient empirical prescriptions: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get patient empirical prescriptions: {str(e)}"
+        )
+
+
+@app.get(
+    "/patients/{patient_id}/prescriptions/general",
+    response_model=List[HandwrittenVisitNote],
+    tags=["Prescriptions"],
+    summary="Get all general prescriptions for a patient",
+    description="Get all general prescriptions across all patient visits"
+)
+async def get_patient_general_prescriptions(
+    patient_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """Get all general prescriptions for a patient"""
+    try:
+        patient = await db.get_patient_by_id(patient_id, current_doctor["firebase_uid"])
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        notes = await db.get_handwritten_visit_notes_by_patient_id(patient_id, current_doctor["firebase_uid"])
+        general_notes = [n for n in notes if n.get("prescription_type") in (None, "general")]
+        
+        return [HandwrittenVisitNote(**note) for note in general_notes]
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting patient general prescriptions: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get patient general prescriptions: {str(e)}"
+        )
+
+
+@app.get(
+    "/patients/{patient_id}/prescriptions/remote",
+    response_model=List[dict],
+    tags=["Prescriptions"],
+    summary="Get all remote prescriptions for a patient",
+    description="Get all remote prescriptions sent via WhatsApp across all patient visits"
+)
+async def get_patient_remote_prescriptions(
+    patient_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """Get all remote prescriptions sent for a patient"""
+    try:
+        patient = await db.get_patient_by_id(patient_id, current_doctor["firebase_uid"])
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        # Get all notes for this patient that were sent via WhatsApp
+        notes = await db.get_handwritten_visit_notes_by_patient_id(patient_id, current_doctor["firebase_uid"])
+        remote_notes = [n for n in notes if n.get("sent_via_whatsapp") is True]
+        
+        # Format response with focus on WhatsApp delivery info
+        remote_prescriptions = []
+        for note in remote_notes:
+            remote_prescriptions.append({
+                "id": note["id"],
+                "visit_id": note["visit_id"],
+                "prescription_type": note.get("prescription_type") or "general",
+                "file_url": note["handwritten_pdf_url"],
+                "file_name": note["handwritten_pdf_filename"],
+                "sent_via_whatsapp": True,
+                "whatsapp_message_id": note.get("whatsapp_message_id"),
+                "sent_at": note.get("updated_at"),
+                "created_at": note["created_at"]
+            })
+        
+        return remote_prescriptions
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting patient remote prescriptions: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get patient remote prescriptions: {str(e)}"
         )
 
 @app.get("/handwritten-notes/{note_id}/download")
@@ -5544,6 +6395,73 @@ async def download_handwritten_note(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to download handwritten note: {str(e)}"
+        )
+
+@app.delete(
+    "/handwritten-notes/{note_id}",
+    response_model=dict,
+    tags=["Prescriptions", "Visits"],
+    summary="Delete a handwritten note or prescription",
+    description="""Delete a handwritten note/prescription permanently.
+    
+This will:
+- Delete the PDF from cloud storage
+- Remove the database record
+- Work for any prescription type (general, empirical, follow-up)
+
+⚠️ **Warning**: This action cannot be undone.
+"""
+)
+async def delete_handwritten_note(
+    note_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """Delete a handwritten note or prescription"""
+    try:
+        # Get the handwritten note
+        note = await db.get_handwritten_visit_note_by_id(note_id, current_doctor["firebase_uid"])
+        if not note:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Handwritten note not found"
+            )
+        
+        # Delete file from storage if it exists
+        if note.get("storage_path"):
+            try:
+                await supabase.storage.from_("medical-reports").remove([note["storage_path"]])
+                print(f"Deleted file from storage: {note['storage_path']}")
+            except Exception as storage_error:
+                print(f"Warning: Failed to delete file from storage: {storage_error}")
+                # Continue with deletion even if storage deletion fails
+        
+        # Delete from database
+        success = await db.delete_handwritten_visit_note(note_id, current_doctor["firebase_uid"])
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to delete handwritten note from database"
+            )
+        
+        # Handle prescription_type that might be None
+        prescription_type = note.get("prescription_type") or "general"
+        prescription_label = prescription_type.capitalize() if prescription_type else "General"
+        
+        return {
+            "message": f"{prescription_label} prescription deleted successfully",
+            "note_id": note_id,
+            "file_deleted": True,
+            "prescription_type": prescription_type
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting handwritten note: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete handwritten note: {str(e)}"
         )
 
 @app.post("/handwritten-notes/{note_id}/resend-whatsapp", response_model=dict)
@@ -5926,7 +6844,13 @@ class ResolveVisitRequest(BaseModel):
     resolution_type: str = "in_person"  # "in_person", "no_prescription_needed", "referred", "patient_no_show", "other"
     resolution_note: Optional[str] = None
 
-@app.post("/visits/{visit_id}/resolve-pending", response_model=dict)
+@app.patch(
+    "/visits/{visit_id}/pending-status", 
+    response_model=dict,
+    tags=["Visits", "Prescriptions"],
+    summary="Resolve or update pending visit status",
+    description="Mark a visit as resolved without sending a remote prescription"
+)
 async def resolve_pending_visit(
     visit_id: int,
     resolution: ResolveVisitRequest = Body(default=ResolveVisitRequest()),
@@ -5989,7 +6913,12 @@ async def resolve_pending_visit(
             detail=f"Failed to resolve pending visit: {str(e)}"
         )
 
-@app.post("/visits/{visit_id}/reopen-pending", response_model=dict)
+@app.patch(
+    "/visits/{visit_id}/reopen-pending", 
+    response_model=dict,
+    tags=["Visits", "Prescriptions"],
+    summary="Reopen a resolved pending visit"
+)
 async def reopen_pending_visit(
     visit_id: int,
     current_doctor = Depends(get_current_doctor)
@@ -6313,117 +7242,8 @@ async def send_remote_prescription(
             detail=f"Failed to send remote prescription: {str(e)}"
         )
 
-class ResendPrescriptionRequest(BaseModel):
-    custom_message: Optional[str] = None
-
-@app.post("/handwritten-notes/{note_id}/resend-whatsapp", response_model=dict)
-async def resend_prescription_via_whatsapp(
-    note_id: int,
-    request_data: ResendPrescriptionRequest = Body(default=ResendPrescriptionRequest()),
-    current_doctor = Depends(get_current_doctor)
-):
-    """
-    Resend an existing prescription/handwritten note via WhatsApp.
-    Use this when:
-    - The original WhatsApp message wasn't sent
-    - Patient didn't receive the first message
-    - Doctor wants to send the prescription again
-    """
-    try:
-        # Get the handwritten note
-        note = await db.get_handwritten_visit_note_by_id(note_id, current_doctor["firebase_uid"])
-        if not note:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Prescription note not found"
-            )
-        
-        # Get visit and patient
-        visit = await db.get_visit_by_id(note["visit_id"], current_doctor["firebase_uid"])
-        if not visit:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Visit not found"
-            )
-        
-        patient = await db.get_patient_by_id(note["patient_id"], current_doctor["firebase_uid"])
-        if not patient:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Patient not found"
-            )
-        
-        if not patient.get("phone"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Patient phone number not available"
-            )
-        
-        if not note.get("handwritten_pdf_url"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No PDF file found for this prescription"
-            )
-        
-        # Build WhatsApp message
-        patient_name = f"{patient['first_name']} {patient['last_name']}"
-        doctor_name = f"Dr. {current_doctor['first_name']} {current_doctor['last_name']}"
-        
-        if request_data.custom_message:
-            message = request_data.custom_message
-        else:
-            message = f"Dear {patient_name},\n\nHere is your prescription from {doctor_name}.\n\nPlease follow the instructions carefully. If you have any questions, feel free to contact us.\n\nThank you."
-        
-        # Send via WhatsApp
-        try:
-            whatsapp_result = await whatsapp_service.send_pdf_document(
-                to_phone=patient["phone"],
-                document_url=note["handwritten_pdf_url"],
-                filename=note.get("handwritten_pdf_filename", "prescription.pdf"),
-                caption=message
-            )
-            
-            if whatsapp_result.get("success"):
-                # Update note record
-                await db.update_handwritten_visit_note(
-                    note_id,
-                    current_doctor["firebase_uid"],
-                    {
-                        "sent_via_whatsapp": True,
-                        "whatsapp_message_id": whatsapp_result.get("message_id"),
-                        "whatsapp_sent_at": datetime.now(timezone.utc).isoformat()
-                    }
-                )
-                
-                return {
-                    "message": "Prescription sent successfully via WhatsApp",
-                    "note_id": note_id,
-                    "patient_phone": patient["phone"],
-                    "whatsapp_message_id": whatsapp_result.get("message_id"),
-                    "sent_at": datetime.now(timezone.utc).isoformat()
-                }
-            else:
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"WhatsApp sending failed: {whatsapp_result.get('error', 'Unknown error')}"
-                )
-                
-        except HTTPException:
-            raise
-        except Exception as wa_error:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"WhatsApp error: {str(wa_error)}"
-            )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error resending prescription: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to resend prescription: {str(e)}"
-        )
+# NOTE: ResendPrescriptionRequest and resend-whatsapp endpoint moved earlier in the file
+# See POST /handwritten-notes/{note_id}/resend-whatsapp around line 6101
 
 @app.get("/visits/{visit_id}/handwriting-interface", response_class=HTMLResponse)
 async def show_handwriting_interface(visit_id: int):
@@ -8392,7 +9212,12 @@ async def download_patient_profile_pdf(
         )
 
 # Calendar Management Routes
-@app.get("/calendar/{year}/{month}", response_model=MonthlyCalendar)
+@app.get(
+    "/calendar/{year}/{month}", 
+    response_model=MonthlyCalendar,
+    tags=["Calendar"],
+    summary="Get monthly calendar"
+)
 async def get_monthly_calendar(
     year: int, 
     month: int, 
@@ -8463,7 +9288,7 @@ async def get_monthly_calendar(
             detail="Failed to get monthly calendar"
         )
 
-@app.get("/calendar/current", response_model=MonthlyCalendar)
+@app.get("/calendar/current", response_model=MonthlyCalendar, tags=["Calendar"])
 async def get_current_month_calendar(current_doctor = Depends(get_current_doctor)):
     """Get follow-up appointments for the current month"""
     try:
@@ -8478,7 +9303,7 @@ async def get_current_month_calendar(current_doctor = Depends(get_current_doctor
             detail="Failed to get current month calendar"
         )
 
-@app.get("/calendar/summary", response_model=CalendarSummary)
+@app.get("/calendar/summary", response_model=CalendarSummary, tags=["Calendar"])
 async def get_calendar_summary(current_doctor = Depends(get_current_doctor)):
     """Get summary of upcoming appointments"""
     try:
@@ -8505,7 +9330,7 @@ async def get_calendar_summary(current_doctor = Depends(get_current_doctor)):
             detail="Failed to get calendar summary"
         )
 
-@app.get("/calendar/debug/appointments/{date}")
+@app.get("/calendar/debug/appointments/{date}", tags=["Calendar"])
 async def debug_appointments_for_date(
     date: str,
     current_doctor = Depends(get_current_doctor)
@@ -8532,7 +9357,7 @@ async def debug_appointments_for_date(
             detail=f"Debug error: {str(e)}"
         )
 
-@app.get("/calendar/appointments/{date}", response_model=List[CalendarAppointment])
+@app.get("/calendar/appointments/{date}", response_model=List[CalendarAppointment], tags=["Calendar"])
 async def get_appointments_by_date(
     date: str,  # Format: YYYY-MM-DD
     current_doctor = Depends(get_current_doctor)
@@ -8602,7 +9427,7 @@ async def get_appointments_by_date(
             detail=f"Failed to get appointments for the specified date: {str(e)}"
         )
 
-@app.get("/calendar/upcoming", response_model=List[CalendarAppointment])
+@app.get("/calendar/upcoming", response_model=List[CalendarAppointment], tags=["Calendar"])
 async def get_upcoming_appointments(
     days: int = 7,  # Number of days to look ahead
     current_doctor = Depends(get_current_doctor)
@@ -8646,7 +9471,7 @@ async def get_upcoming_appointments(
             detail="Failed to get upcoming appointments"
         )
 
-@app.get("/calendar/overdue", response_model=List[CalendarAppointment])
+@app.get("/calendar/overdue", response_model=List[CalendarAppointment], tags=["Calendar"])
 async def get_overdue_appointments(current_doctor = Depends(get_current_doctor)):
     """Get all overdue follow-up appointments"""
     try:
@@ -8681,7 +9506,7 @@ async def get_overdue_appointments(current_doctor = Depends(get_current_doctor))
             detail="Failed to get overdue appointments"
         )
 
-@app.put("/visits/{visit_id}/follow-up-date", response_model=dict)
+@app.put("/visits/{visit_id}/follow-up-date", response_model=dict, tags=["Calendar", "Visits"])
 async def update_follow_up_date(
     visit_id: int,
     follow_up_date: str,  # YYYY-MM-DD format
@@ -8883,7 +9708,7 @@ Best regards,
             detail=f"Failed to send appointment reminder: {str(e)}"
         )
 
-@app.put("/visits/{visit_id}/billing", response_model=dict)
+@app.put("/visits/{visit_id}/billing", response_model=dict, tags=["Billing", "Visits"])
 async def update_visit_billing(
     visit_id: int,
     billing_data: BillingUpdate,
@@ -8941,7 +9766,12 @@ async def update_visit_billing(
             detail="Failed to update billing information"
         )
 
-@app.get("/earnings/daily/{date}", response_model=EarningsReport)
+@app.get(
+    "/earnings/daily/{date}", 
+    response_model=EarningsReport,
+    tags=["Billing"],
+    summary="Get daily earnings report"
+)
 async def get_daily_earnings(
     date: str,  # Format: YYYY-MM-DD
     current_doctor = Depends(get_current_doctor)
@@ -8977,7 +9807,7 @@ async def get_daily_earnings(
             detail="Failed to get daily earnings"
         )
 
-@app.get("/earnings/monthly/{year}/{month}", response_model=EarningsReport)
+@app.get("/earnings/monthly/{year}/{month}", response_model=EarningsReport, tags=["Billing"])
 async def get_monthly_earnings(
     year: int,
     month: int,
@@ -9012,7 +9842,7 @@ async def get_monthly_earnings(
             detail="Failed to get monthly earnings"
         )
 
-@app.get("/earnings/yearly/{year}", response_model=EarningsReport)
+@app.get("/earnings/yearly/{year}", response_model=EarningsReport, tags=["Billing"])
 async def get_yearly_earnings(
     year: int,
     current_doctor = Depends(get_current_doctor)
@@ -9040,7 +9870,7 @@ async def get_yearly_earnings(
             detail="Failed to get yearly earnings"
         )
 
-@app.post("/earnings/custom", response_model=EarningsReport)
+@app.post("/earnings/custom", response_model=EarningsReport, tags=["Billing"])
 async def get_custom_earnings_report(
     filters: EarningsFilter,
     current_doctor = Depends(get_current_doctor)
@@ -9082,7 +9912,7 @@ async def get_custom_earnings_report(
             detail="Failed to get custom earnings report"
         )
 
-@app.get("/earnings/pending-payments", response_model=list[Visit])
+@app.get("/earnings/pending-payments", response_model=list[Visit], tags=["Billing"])
 async def get_pending_payments(current_doctor = Depends(get_current_doctor)):
     """Get all visits with pending payments"""
     try:
@@ -9095,7 +9925,7 @@ async def get_pending_payments(current_doctor = Depends(get_current_doctor)):
             detail="Failed to get pending payments"
         )
 
-@app.get("/earnings/dashboard", response_model=dict)
+@app.get("/earnings/dashboard", response_model=dict, tags=["Billing"])
 async def get_earnings_dashboard(current_doctor = Depends(get_current_doctor)):
     """Get earnings dashboard with today, this month, and this year statistics"""
     try:
@@ -9143,7 +9973,12 @@ async def get_earnings_dashboard(current_doctor = Depends(get_current_doctor)):
         )
 
 # PDF Template Management Routes
-@app.post("/pdf-templates/upload", response_model=dict)
+@app.post(
+    "/pdf-templates/upload", 
+    response_model=dict,
+    tags=["Templates"],
+    summary="Upload a prescription template"
+)
 async def upload_pdf_template(request: Request, current_doctor = Depends(get_current_doctor)):
     """Upload a PDF template for the doctor's clinic"""
     try:
@@ -9265,7 +10100,7 @@ async def upload_pdf_template(request: Request, current_doctor = Depends(get_cur
             detail="Failed to upload PDF template"
         )
 
-@app.get("/pdf-templates", response_model=list[PDFTemplate])
+@app.get("/pdf-templates", response_model=list[PDFTemplate], tags=["Templates"])
 async def get_pdf_templates(current_doctor = Depends(get_current_doctor)):
     """Get all PDF templates for the current doctor"""
     try:
@@ -9278,7 +10113,7 @@ async def get_pdf_templates(current_doctor = Depends(get_current_doctor)):
             detail="Failed to fetch PDF templates"
         )
 
-@app.get("/pdf-templates/{template_id}", response_model=PDFTemplate)
+@app.get("/pdf-templates/{template_id}", response_model=PDFTemplate, tags=["Templates"])
 async def get_pdf_template(template_id: int, current_doctor = Depends(get_current_doctor)):
     """Get a specific PDF template"""
     try:
@@ -9298,7 +10133,7 @@ async def get_pdf_template(template_id: int, current_doctor = Depends(get_curren
             detail="Failed to fetch PDF template"
         )
 
-@app.put("/pdf-templates/{template_id}", response_model=dict)
+@app.put("/pdf-templates/{template_id}", response_model=dict, tags=["Templates"])
 async def update_pdf_template(
     template_id: int,
     template_update: PDFTemplateUpload,
@@ -9339,7 +10174,7 @@ async def update_pdf_template(
             detail="Failed to update PDF template"
         )
 
-@app.delete("/pdf-templates/{template_id}", response_model=dict)
+@app.delete("/pdf-templates/{template_id}", response_model=dict, tags=["Templates"])
 async def delete_pdf_template(template_id: int, current_doctor = Depends(get_current_doctor)):
     """Delete a PDF template"""
     try:
@@ -9378,7 +10213,7 @@ async def delete_pdf_template(template_id: int, current_doctor = Depends(get_cur
             detail="Failed to delete PDF template"
         )
 
-@app.get("/pdf-templates/{template_id}/download")
+@app.get("/pdf-templates/{template_id}/download", tags=["Templates"])
 async def download_pdf_template(template_id: int, current_doctor = Depends(get_current_doctor)):
     """Download a PDF template"""
     try:
@@ -9568,9 +10403,12 @@ async def generate_visit_report(
             detail="Failed to generate visit report"
         )
 
-@app.get("/visits/{visit_id}/reports", response_model=list[VisitReport])
+@app.get("/visits/{visit_id}/generated-reports", response_model=list[VisitReport])
 async def get_visit_reports_generated(visit_id: int, current_doctor = Depends(get_current_doctor)):
-    """Get all generated visit reports for a specific visit"""
+    """Get all generated visit reports (PDF summaries) for a specific visit.
+    
+    Note: For uploaded medical/lab reports, use GET /visits/{visit_id}/reports instead.
+    """
     try:
         # Verify the visit exists and belongs to the current doctor
         visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
@@ -10829,50 +11667,7 @@ async def debug_patient_history_analysis(
             "traceback": traceback.format_exc()
         }
 
-@app.post("/patients/{patient_id}/cleanup-history-analyses", response_model=dict)
-async def cleanup_patient_history_analyses(
-    patient_id: int,
-    current_doctor = Depends(get_current_doctor)
-):
-    """Manually clean up outdated comprehensive history analyses for a specific patient"""
-    try:
-        # Verify the patient exists and belongs to the current doctor
-        patient = await db.get_patient_by_id(patient_id, current_doctor["firebase_uid"])
-        if not patient:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Patient not found"
-            )
-        
-        # Get analyses before cleanup
-        analyses_before = await db.get_patient_history_analyses(patient_id, current_doctor["firebase_uid"])
-        
-        # Run cleanup
-        cleanup_result = await db.cleanup_outdated_patient_history_analyses(patient_id, current_doctor["firebase_uid"])
-        
-        # Get analyses after cleanup
-        analyses_after = await db.get_patient_history_analyses(patient_id, current_doctor["firebase_uid"])
-        
-        cleaned_count = len(analyses_before) - len(analyses_after)
-        
-        return {
-            "message": "Cleanup completed successfully",
-            "patient_name": f"{patient['first_name']} {patient['last_name']}",
-            "analyses_before": len(analyses_before),
-            "analyses_after": len(analyses_after),
-            "cleaned_count": cleaned_count,
-            "cleanup_success": cleanup_result
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error in patient history analysis cleanup: {e}")
-        print(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred during cleanup"
-        )
+# NOTE: Removed duplicate endpoint - use POST /patients/{patient_id}/cleanup-history-analyses defined earlier
 
 @app.post("/cleanup-all-history-analyses", response_model=dict)
 async def cleanup_all_patient_history_analyses(
@@ -10900,7 +11695,12 @@ async def cleanup_all_patient_history_analyses(
         )
 
 # Notification Endpoints
-@app.get("/notifications", response_model=List[Notification])
+@app.get(
+    "/notifications", 
+    response_model=List[Notification],
+    tags=["Notifications"],
+    summary="Get doctor notifications"
+)
 async def get_notifications(
     unread_only: bool = False,
     limit: int = 50,
@@ -10924,7 +11724,7 @@ async def get_notifications(
             detail="Failed to get notifications"
         )
 
-@app.get("/notifications/summary", response_model=NotificationSummary)
+@app.get("/notifications/summary", response_model=NotificationSummary, tags=["Notifications"])
 async def get_notification_summary(
     current_doctor = Depends(get_current_doctor)
 ):
@@ -10953,7 +11753,7 @@ async def get_notification_summary(
             detail="Failed to get notification summary"
         )
 
-@app.get("/notifications/unread/count", response_model=dict)
+@app.get("/notifications/unread/count", response_model=dict, tags=["Notifications"])
 async def get_unread_notification_count(
     current_doctor = Depends(get_current_doctor)
 ):
@@ -10974,7 +11774,7 @@ async def get_unread_notification_count(
             detail="Failed to get unread notification count"
         )
 
-@app.put("/notifications/{notification_id}/read", response_model=dict)
+@app.put("/notifications/{notification_id}/read", response_model=dict, tags=["Notifications"])
 async def mark_notification_as_read(
     notification_id: int,
     current_doctor = Depends(get_current_doctor)
@@ -11004,7 +11804,7 @@ async def mark_notification_as_read(
             detail="Failed to mark notification as read"
         )
 
-@app.put("/notifications/mark-all-read", response_model=dict)
+@app.put("/notifications/mark-all-read", response_model=dict, tags=["Notifications"])
 async def mark_all_notifications_as_read(
     current_doctor = Depends(get_current_doctor)
 ):
@@ -11026,7 +11826,7 @@ async def mark_all_notifications_as_read(
             detail="Failed to mark all notifications as read"
         )
 
-@app.delete("/notifications/{notification_id}", response_model=dict)
+@app.delete("/notifications/{notification_id}", response_model=dict, tags=["Notifications"])
 async def delete_notification(
     notification_id: int,
     current_doctor = Depends(get_current_doctor)

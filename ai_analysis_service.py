@@ -251,6 +251,61 @@ class AIAnalysisService:
         allergies = patient_context.get('allergies', 'None known')
         blood_group = patient_context.get('blood_group', 'Not specified')
         
+        # Extract prior medical history (from previous doctor consultations)
+        prior_history_section = ""
+        if patient_context.get('consulted_other_doctor'):
+            prior_history_parts = []
+            prior_history_parts.append("**Patient has previously consulted another doctor for this condition.**")
+            
+            if patient_context.get('previous_doctor_name'):
+                doc_info = patient_context.get('previous_doctor_name')
+                if patient_context.get('previous_doctor_specialization'):
+                    doc_info += f" ({patient_context.get('previous_doctor_specialization')})"
+                prior_history_parts.append(f"- Previous Doctor: {doc_info}")
+            
+            if patient_context.get('previous_clinic_hospital'):
+                prior_history_parts.append(f"- Previous Clinic/Hospital: {patient_context.get('previous_clinic_hospital')}")
+            
+            if patient_context.get('previous_consultation_date'):
+                prior_history_parts.append(f"- Previous Consultation Date: {patient_context.get('previous_consultation_date')}")
+            
+            if patient_context.get('previous_symptoms'):
+                prior_history_parts.append(f"- Previous Symptoms: {patient_context.get('previous_symptoms')}")
+            
+            if patient_context.get('previous_diagnosis'):
+                prior_history_parts.append(f"- Previous Diagnosis: {patient_context.get('previous_diagnosis')}")
+            
+            if patient_context.get('previous_medications'):
+                meds = patient_context.get('previous_medications')
+                if isinstance(meds, list):
+                    meds = ', '.join(meds)
+                prior_history_parts.append(f"- Previous Medications: {meds}")
+                if patient_context.get('previous_medications_duration'):
+                    prior_history_parts.append(f"- Medication Duration: {patient_context.get('previous_medications_duration')}")
+            
+            if patient_context.get('medication_response'):
+                prior_history_parts.append(f"- Response to Previous Treatment: {patient_context.get('medication_response')}")
+            
+            if patient_context.get('previous_tests_done'):
+                prior_history_parts.append(f"- Previous Tests Done: {patient_context.get('previous_tests_done')}")
+                if patient_context.get('previous_test_results'):
+                    prior_history_parts.append(f"- Previous Test Results: {patient_context.get('previous_test_results')}")
+            
+            if patient_context.get('reason_for_new_consultation'):
+                prior_history_parts.append(f"- Reason for Seeking New Consultation: {patient_context.get('reason_for_new_consultation')}")
+            
+            prior_history_section = "\n".join(prior_history_parts)
+        
+        # Check for ongoing treatment
+        ongoing_treatment_section = ""
+        if patient_context.get('ongoing_treatment'):
+            ongoing_treatment_section = "\n**⚠️ PATIENT IS CURRENTLY ON ONGOING TREATMENT**"
+            if patient_context.get('current_medications'):
+                meds = patient_context.get('current_medications')
+                if isinstance(meds, list):
+                    meds = ', '.join(meds)
+                ongoing_treatment_section += f"\n- Current Medications: {meds}"
+        
         # Extract visit information with more detail
         visit_date = visit_context.get('visit_date', 'Not specified')
         visit_type = visit_context.get('visit_type', 'General consultation')
@@ -267,15 +322,38 @@ class AIAnalysisService:
         if visit_context.get('vitals'):
             vitals = visit_context.get('vitals', {})
             vitals_parts = []
+            # Blood pressure (handle both formats)
             if vitals.get('blood_pressure'):
                 vitals_parts.append(f"BP: {vitals['blood_pressure']}")
-            if vitals.get('pulse'):
+            elif vitals.get('blood_pressure_systolic') and vitals.get('blood_pressure_diastolic'):
+                vitals_parts.append(f"BP: {vitals['blood_pressure_systolic']}/{vitals['blood_pressure_diastolic']} mmHg")
+            # Heart rate
+            if vitals.get('heart_rate'):
+                vitals_parts.append(f"Heart Rate: {vitals['heart_rate']} bpm")
+            # Pulse rate (handle both field names)
+            if vitals.get('pulse_rate'):
+                vitals_parts.append(f"Pulse Rate: {vitals['pulse_rate']} bpm")
+            elif vitals.get('pulse'):
                 vitals_parts.append(f"Pulse: {vitals['pulse']} bpm")
+            # Temperature
             if vitals.get('temperature'):
-                vitals_parts.append(f"Temp: {vitals['temperature']}°F")
+                vitals_parts.append(f"Temp: {vitals['temperature']}°C")
+            # Respiratory rate
+            if vitals.get('respiratory_rate'):
+                vitals_parts.append(f"Resp Rate: {vitals['respiratory_rate']}/min")
+            # Weight
             if vitals.get('weight'):
                 vitals_parts.append(f"Weight: {vitals['weight']} kg")
-            if vitals.get('spo2'):
+            # Height
+            if vitals.get('height'):
+                vitals_parts.append(f"Height: {vitals['height']} cm")
+            # BMI
+            if vitals.get('bmi'):
+                vitals_parts.append(f"BMI: {vitals['bmi']}")
+            # Oxygen saturation (handle both field names)
+            if vitals.get('oxygen_saturation'):
+                vitals_parts.append(f"SpO2: {vitals['oxygen_saturation']}%")
+            elif vitals.get('spo2'):
                 vitals_parts.append(f"SpO2: {vitals['spo2']}%")
             if vitals_parts:
                 vitals_text = ", ".join(vitals_parts)
@@ -348,6 +426,9 @@ You are an advanced AI medical assistant helping {doctor_name} ({specialization}
 - Blood Group: {blood_group}
 - Known Allergies: {allergies}
 - Medical History: {medical_history}
+{ongoing_treatment_section}
+
+{prior_history_section}
 {visit_chain_section}
 **CURRENT VISIT CONTEXT (CRITICAL FOR ANALYSIS):**
 - Visit Date: {visit_date}
@@ -367,7 +448,7 @@ You are an advanced AI medical assistant helping {doctor_name} ({specialization}
 **ANALYSIS INSTRUCTIONS:**
 
 Your analysis MUST be contextual and personalized. This is not a standalone report analysis - it's an analysis to help the doctor validate their clinical decisions and adjust treatment if needed.
-
+{self._get_prior_treatment_instruction(prior_history_section)}
 Please provide analysis in this ENHANCED format:
 
 **1. DOCUMENT IDENTIFICATION & SUMMARY:**
@@ -474,6 +555,80 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
         except:
             return "Unable to calculate"
     
+    def _format_prior_medical_history_for_prompt(self, patient_context: Dict[str, Any]) -> str:
+        """Format prior medical history (from previous doctor consultations) for AI prompts"""
+        if not patient_context.get('consulted_other_doctor'):
+            return ""
+        
+        lines = [
+            "",
+            "═══════════════════════════════════════════════════════════════",
+            "**🩺 PRIOR MEDICAL HISTORY (FROM PREVIOUS DOCTOR CONSULTATION)**",
+            "═══════════════════════════════════════════════════════════════",
+            "┌─────────────────────────────────────────────────────────────────",
+            "│ ⚠️ IMPORTANT: Patient has previously consulted another doctor",
+        ]
+        
+        if patient_context.get('previous_doctor_name'):
+            doc_info = f"│ 👨‍⚕️ Previous Doctor: {patient_context.get('previous_doctor_name')}"
+            if patient_context.get('previous_doctor_specialization'):
+                doc_info += f" ({patient_context.get('previous_doctor_specialization')})"
+            lines.append(doc_info)
+        
+        if patient_context.get('previous_clinic_hospital'):
+            lines.append(f"│ 🏥 Previous Clinic/Hospital: {patient_context.get('previous_clinic_hospital')}")
+        
+        if patient_context.get('previous_consultation_date'):
+            lines.append(f"│ 📅 Previous Consultation Date: {patient_context.get('previous_consultation_date')}")
+        
+        if patient_context.get('previous_symptoms'):
+            lines.append(f"│ 🤒 Previous Symptoms: {patient_context.get('previous_symptoms')}")
+        
+        if patient_context.get('previous_diagnosis'):
+            lines.append(f"│ 📋 Previous Diagnosis: {patient_context.get('previous_diagnosis')}")
+        
+        if patient_context.get('previous_medications'):
+            meds = patient_context.get('previous_medications')
+            if isinstance(meds, list):
+                meds = ', '.join(meds)
+            lines.append(f"│ 💊 Previous Medications: {meds}")
+            if patient_context.get('previous_medications_duration'):
+                lines.append(f"│ ⏱️ Medication Duration: {patient_context.get('previous_medications_duration')}")
+        
+        if patient_context.get('medication_response'):
+            response = patient_context.get('medication_response')
+            emoji = "✅" if response == "improved" else "⚠️" if response == "partial improvement" else "❌" if response in ["no change", "worsened"] else "❓"
+            lines.append(f"│ {emoji} Response to Previous Treatment: {response.title()}")
+        
+        if patient_context.get('previous_tests_done'):
+            lines.append(f"│ 🧪 Previous Tests Done: {patient_context.get('previous_tests_done')}")
+            if patient_context.get('previous_test_results'):
+                lines.append(f"│ 📊 Previous Test Results: {patient_context.get('previous_test_results')}")
+        
+        if patient_context.get('reason_for_new_consultation'):
+            lines.append(f"│ ❓ Reason for Seeking New Consultation: {patient_context.get('reason_for_new_consultation')}")
+        
+        if patient_context.get('ongoing_treatment'):
+            lines.append("│ 🔄 Patient is currently on ONGOING TREATMENT")
+            if patient_context.get('current_medications'):
+                curr_meds = patient_context.get('current_medications')
+                if isinstance(curr_meds, list):
+                    curr_meds = ', '.join(curr_meds)
+                lines.append(f"│ 💊 Current Medications: {curr_meds}")
+        
+        lines.append("└─────────────────────────────────────────────────────────────────")
+        lines.append("")
+        
+        return "\n".join(lines)
+    
+    def _get_prior_treatment_instruction(self, prior_history_section: str) -> str:
+        """Return instruction text if patient has prior treatment history"""
+        if prior_history_section:
+            return """
+**⚠️ IMPORTANT - PRIOR TREATMENT CONTEXT:** This patient has previously been treated by another doctor. Consider the prior diagnosis, previous medications, and treatment response when analyzing this document. Evaluate if the current findings suggest the previous treatment was effective, partially effective, or if a different approach may be needed.
+"""
+        return ""
+
     async def _perform_gemini_analysis(
         self, 
         prompt: str, 
@@ -1009,11 +1164,13 @@ Focus on creating a cohesive medical narrative that helps Dr. {doctor_name} make
                 if vitals:
                     vitals_parts = []
                     if vitals.get('temperature'):
-                        vitals_parts.append(f"Temp: {vitals['temperature']}°F")
+                        vitals_parts.append(f"Temp: {vitals['temperature']}°C")
                     if vitals.get('blood_pressure_systolic') and vitals.get('blood_pressure_diastolic'):
                         vitals_parts.append(f"BP: {vitals['blood_pressure_systolic']}/{vitals['blood_pressure_diastolic']} mmHg")
                     if vitals.get('heart_rate'):
                         vitals_parts.append(f"HR: {vitals['heart_rate']} bpm")
+                    if vitals.get('pulse_rate'):
+                        vitals_parts.append(f"Pulse: {vitals['pulse_rate']} bpm")
                     if vitals.get('respiratory_rate'):
                         vitals_parts.append(f"RR: {vitals['respiratory_rate']}/min")
                     if vitals.get('oxygen_saturation'):
@@ -1181,6 +1338,7 @@ Your task is to find patterns, correlations, missed opportunities, and provide i
 │ 📧 Email: {patient_context.get('email', 'Not provided')}
 │ 📱 Phone: {patient_context.get('phone', 'Not provided')}
 └─────────────────────────────────────────────────────────────────
+{self._format_prior_medical_history_for_prompt(patient_context)}
 {visits_summary}
 {reports_summary}
 {handwritten_summary}
