@@ -260,7 +260,26 @@ Patient registration now supports detailed prior medical history including:
         },
         {
             "name": "AI Analysis",
-            "description": "AI-powered medical analysis endpoints"
+            "description": """AI-powered medical document analysis using Google Gemini.
+
+### Features:
+- **Structured JSON Output**: All analysis results use structured JSON schemas for reliable parsing
+- **Critical Findings Detection**: Automatic detection of critical values and urgent findings
+- **Clinical Alert Generation**: Auto-generates alerts for critical findings requiring attention
+- **Treatment Evaluation**: AI-powered assessment of treatment effectiveness
+
+### Analysis Types:
+- **Document Analysis**: Lab reports, imaging results, discharge summaries
+- **Handwritten Notes**: Prescription and clinical note digitization
+- **Comprehensive History**: Full patient journey analysis across visits
+- **Consolidated Analysis**: Multi-document synthesis and insights
+
+### Output Schemas:
+All responses include structured data with:
+- findings, critical_findings, clinical_correlation
+- treatment_evaluation, actionable_insights
+- patient_communication summaries
+"""
         },
         {
             "name": "Prescriptions",
@@ -294,6 +313,30 @@ Empirical prescriptions include a disclaimer that the prescription may be modifi
         {
             "name": "Notifications",
             "description": "Doctor notifications and alerts"
+        },
+        {
+            "name": "Clinical Alerts",
+            "description": """AI-powered clinical alerts and critical findings notification system.
+
+### Alert Types:
+- **critical_value**: Critical lab values requiring immediate attention
+- **drug_interaction**: Potential drug interactions or contraindications
+- **diagnosis_concern**: Suspicious findings requiring further investigation
+- **follow_up_urgent**: Urgent follow-up recommendations
+- **treatment_alert**: Treatment modification recommendations
+- **safety_concern**: Patient safety alerts
+
+### Severity Levels:
+- **high**: Immediate action required (critical values, life-threatening)
+- **medium**: Prompt attention needed (significant abnormalities)
+- **low**: Informational alerts for awareness
+
+### Features:
+- Real-time alert generation from AI analysis
+- Acknowledge alerts with optional notes
+- Patient-specific and visit-specific alert views
+- Alert history tracking
+"""
         }
     ]
 )
@@ -1611,6 +1654,110 @@ class ReportWithAnalysis(BaseModel):
     report: Report
     ai_analysis: Optional[AIAnalysisResult] = None
     analysis_status: str  # "completed", "pending", "failed", "not_requested"
+
+
+# ============================================================================
+# CLINICAL ALERT MODELS
+# ============================================================================
+
+class ClinicalAlertBase(BaseModel):
+    """Base model for clinical alerts"""
+    id: str = Field(..., description="Unique alert identifier (UUID)")
+    alert_type: str = Field(..., description="Type of alert: critical_value, drug_interaction, diagnosis_concern, follow_up_urgent, treatment_alert, safety_concern")
+    severity: str = Field(..., description="Severity level: high, medium, low")
+    title: str = Field(..., description="Brief alert title")
+    description: str = Field(..., description="Detailed alert description")
+    source_finding: Optional[Dict[str, Any]] = Field(default=None, description="Original finding that triggered the alert")
+    recommended_action: Optional[str] = Field(default=None, description="Recommended action to take")
+    patient_id: int = Field(..., description="Patient ID")
+    visit_id: Optional[int] = Field(default=None, description="Visit ID if applicable")
+    analysis_id: Optional[str] = Field(default=None, description="Source AI analysis ID")
+    created_at: str = Field(..., description="Alert creation timestamp")
+
+
+class ClinicalAlert(ClinicalAlertBase):
+    """Full clinical alert model including acknowledgment status"""
+    acknowledged: bool = Field(default=False, description="Whether alert has been acknowledged")
+    acknowledged_at: Optional[str] = Field(default=None, description="When alert was acknowledged")
+    acknowledged_by: Optional[str] = Field(default=None, description="Doctor who acknowledged")
+    acknowledgment_notes: Optional[str] = Field(default=None, description="Notes added during acknowledgment")
+
+
+class AlertListResponse(BaseModel):
+    """Response model for alert list endpoints"""
+    alerts: List[ClinicalAlert] = Field(..., description="List of clinical alerts")
+    count: int = Field(..., description="Number of alerts returned")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "alerts": [
+                    {
+                        "id": "550e8400-e29b-41d4-a716-446655440000",
+                        "alert_type": "critical_value",
+                        "severity": "high",
+                        "title": "Critical Hemoglobin Level",
+                        "description": "Hemoglobin at 6.2 g/dL is critically low",
+                        "recommended_action": "Consider blood transfusion",
+                        "patient_id": 123,
+                        "visit_id": 456,
+                        "created_at": "2026-01-17T10:30:00Z",
+                        "acknowledged": False
+                    }
+                ],
+                "count": 1
+            }
+        }
+
+
+class AlertCountsResponse(BaseModel):
+    """Response model for alert counts endpoint"""
+    counts: Dict[str, int] = Field(..., description="Alert counts by severity")
+    has_alerts: bool = Field(..., description="Whether any unacknowledged alerts exist")
+    has_high_priority: bool = Field(..., description="Whether high severity alerts exist")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "counts": {"high": 2, "medium": 5, "low": 3, "total": 10},
+                "has_alerts": True,
+                "has_high_priority": True
+            }
+        }
+
+
+class AlertAcknowledgeResponse(BaseModel):
+    """Response model for alert acknowledgment"""
+    message: str = Field(..., description="Success message")
+    alert_id: str = Field(..., description="ID of acknowledged alert")
+
+
+class AlertAcknowledgeAllResponse(BaseModel):
+    """Response model for bulk alert acknowledgment"""
+    message: str = Field(..., description="Success message")
+    patient_id: int = Field(..., description="Patient ID")
+    acknowledged_count: int = Field(..., description="Number of alerts acknowledged")
+
+
+class AlertHistoryResponse(BaseModel):
+    """Response model for alert history"""
+    alerts: List[ClinicalAlert] = Field(..., description="List of alerts including acknowledged ones")
+    count: int = Field(..., description="Total alerts returned")
+    patient_id: int = Field(..., description="Patient ID")
+    days: int = Field(..., description="Number of days of history")
+
+
+class VisitAlertsResponse(BaseModel):
+    """Response model for visit-specific alerts"""
+    alerts: List[ClinicalAlert] = Field(..., description="Alerts for the visit")
+    count: int = Field(..., description="Number of alerts")
+    visit_id: int = Field(..., description="Visit ID")
+
+
+# ============================================================================
+# END CLINICAL ALERT MODELS
+# ============================================================================
+
 
 # Enhanced exception handler
 @app.exception_handler(Exception)
@@ -11251,6 +11398,991 @@ async def trigger_queue_cleanup(current_doctor: dict = Depends(get_current_docto
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to cleanup queue"
         )
+
+# ============================================================================
+# CLINICAL ALERTS ENDPOINTS
+# ============================================================================
+
+@app.get("/alerts", response_model=AlertListResponse, tags=["Clinical Alerts"])
+async def get_clinical_alerts(
+    patient_id: Optional[int] = None,
+    severity: Optional[str] = None,
+    limit: int = 50,
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Get unacknowledged clinical alerts for the current doctor.
+    
+    Returns AI-generated alerts from document analysis including critical lab values,
+    drug interactions, and urgent findings requiring attention.
+    
+    **Query Parameters:**
+    - **patient_id**: Optional - Filter alerts by specific patient
+    - **severity**: Optional - Filter by severity level (high, medium, low)
+    - **limit**: Maximum alerts to return (default: 50, max: 100)
+    
+    **Response:**
+    - **alerts**: List of alert objects with details
+    - **count**: Total number of alerts returned
+    
+    **Alert Object Properties:**
+    - id, alert_type, severity, title, description
+    - source_finding, recommended_action
+    - patient_id, visit_id, analysis_id
+    - created_at, acknowledged (always false for this endpoint)
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        alerts = await db.get_unacknowledged_alerts(
+            doctor_firebase_uid=doctor_uid,
+            patient_id=patient_id,
+            severity=severity,
+            limit=limit
+        )
+        
+        return {
+            "alerts": alerts,
+            "count": len(alerts)
+        }
+    except Exception as e:
+        print(f"Error getting clinical alerts: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get clinical alerts"
+        )
+
+@app.get("/alerts/counts", response_model=dict, tags=["Clinical Alerts"])
+async def get_alert_counts(current_doctor: dict = Depends(get_current_doctor)):
+    """
+    Get counts of unacknowledged alerts grouped by severity.
+    
+    Useful for displaying alert badges/indicators in the UI without
+    fetching full alert details.
+    
+    **Response:**
+    - **counts**: Object with high, medium, low, and total counts
+    - **has_alerts**: Boolean indicating if any alerts exist
+    - **has_high_priority**: Boolean indicating critical alerts exist
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        counts = await db.get_alert_counts(doctor_uid)
+        
+        return {
+            "counts": counts,
+            "has_alerts": counts.get("total", 0) > 0,
+            "has_high_priority": counts.get("high", 0) > 0
+        }
+    except Exception as e:
+        print(f"Error getting alert counts: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get alert counts"
+        )
+
+@app.post("/alerts/{alert_id}/acknowledge", response_model=dict, tags=["Clinical Alerts"])
+async def acknowledge_alert(
+    alert_id: str,
+    notes: Optional[str] = None,
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Acknowledge a clinical alert.
+    
+    Marks the alert as reviewed by the doctor. Acknowledged alerts
+    won't appear in the unacknowledged alerts list but remain in history.
+    
+    **Path Parameters:**
+    - **alert_id**: UUID of the alert to acknowledge
+    
+    **Body Parameters:**
+    - **notes**: Optional notes about actions taken (max 1000 chars)
+    
+    **Response:**
+    - **message**: Success confirmation
+    - **alert_id**: ID of acknowledged alert
+    
+    **Errors:**
+    - 404: Alert not found or already acknowledged
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        success = await db.acknowledge_alert(
+            alert_id=alert_id,
+            doctor_firebase_uid=doctor_uid,
+            notes=notes
+        )
+        
+        if success:
+            return {
+                "message": "Alert acknowledged successfully",
+                "alert_id": alert_id
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Alert not found or already acknowledged"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error acknowledging alert: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to acknowledge alert"
+        )
+
+@app.post("/patients/{patient_id}/alerts/acknowledge-all", response_model=dict, tags=["Clinical Alerts"])
+async def acknowledge_all_patient_alerts(
+    patient_id: int,
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Acknowledge all unacknowledged alerts for a specific patient.
+    
+    Bulk operation useful when reviewing a patient's complete alert history.
+    
+    **Path Parameters:**
+    - **patient_id**: ID of the patient
+    
+    **Response:**
+    - **message**: Success confirmation with count
+    - **patient_id**: ID of the patient
+    - **acknowledged_count**: Number of alerts acknowledged
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        count = await db.acknowledge_all_patient_alerts(
+            patient_id=patient_id,
+            doctor_firebase_uid=doctor_uid
+        )
+        
+        return {
+            "message": f"Acknowledged {count} alerts for patient",
+            "patient_id": patient_id,
+            "acknowledged_count": count
+        }
+    except Exception as e:
+        print(f"Error acknowledging patient alerts: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to acknowledge alerts"
+        )
+
+@app.get("/patients/{patient_id}/alerts/history", response_model=dict, tags=["Clinical Alerts"])
+async def get_patient_alert_history(
+    patient_id: int,
+    days: int = 90,
+    include_acknowledged: bool = True,
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Get complete alert history for a patient.
+    
+    Returns both acknowledged and unacknowledged alerts within the
+    specified time period for historical review.
+    
+    **Path Parameters:**
+    - **patient_id**: ID of the patient
+    
+    **Query Parameters:**
+    - **days**: Number of days of history (default: 90, max: 365)
+    - **include_acknowledged**: Include acknowledged alerts (default: true)
+    
+    **Response:**
+    - **alerts**: List of alert objects with acknowledgment details
+    - **count**: Total alerts returned
+    - **patient_id**: Patient ID
+    - **days**: Days of history returned
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        alerts = await db.get_patient_alert_history(
+            patient_id=patient_id,
+            doctor_firebase_uid=doctor_uid,
+            days=days,
+            include_acknowledged=include_acknowledged
+        )
+        
+        return {
+            "alerts": alerts,
+            "count": len(alerts),
+            "patient_id": patient_id,
+            "days": days
+        }
+    except Exception as e:
+        print(f"Error getting patient alert history: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get alert history"
+        )
+
+@app.get("/visits/{visit_id}/alerts", response_model=dict, tags=["Clinical Alerts"])
+async def get_visit_alerts(
+    visit_id: int,
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Get all alerts generated during a specific visit.
+    
+    Returns alerts from all document analyses performed during the visit,
+    useful for reviewing findings from a particular consultation.
+    
+    **Path Parameters:**
+    - **visit_id**: ID of the visit
+    
+    **Response:**
+    - **alerts**: List of alert objects for this visit
+    - **count**: Total alerts for the visit
+    - **visit_id**: Visit ID
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        alerts = await db.get_alerts_for_visit(
+            visit_id=visit_id,
+            doctor_firebase_uid=doctor_uid
+        )
+        
+        return {
+            "alerts": alerts,
+            "count": len(alerts),
+            "visit_id": visit_id
+        }
+    except Exception as e:
+        print(f"Error getting visit alerts: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get visit alerts"
+        )
+
+# ============================================================================
+# END OF CLINICAL ALERTS ENDPOINTS
+# ============================================================================
+
+# ============================================================================
+# PHASE 2: CLINICAL INTELLIGENCE ENDPOINTS
+# ============================================================================
+
+# Import medication service
+from medication_service import MedicationInteractionService, get_medication_service
+
+# Pydantic models for Phase 2 endpoints
+class MedicationCheckRequest(BaseModel):
+    current_medications: List[str] = Field(default=[], description="List of current medications")
+    new_medications: List[str] = Field(default=[], description="List of new medications to check")
+    patient_allergies: str = Field(default="", description="Patient's known allergies")
+    patient_conditions: Optional[List[str]] = Field(default=None, description="Patient's medical conditions")
+
+class VisitSummaryRequest(BaseModel):
+    include_reports: bool = Field(default=True, description="Include AI report analyses")
+    include_handwritten: bool = Field(default=True, description="Include handwritten note analyses")
+
+class RiskScoreRequest(BaseModel):
+    recalculate: bool = Field(default=False, description="Force recalculation even if recent score exists")
+    include_all_visits: bool = Field(default=True, description="Include all visits in analysis")
+
+# -------------------------------------------------------------------------
+# Medication Interaction Checking (Phase 2.1)
+# -------------------------------------------------------------------------
+
+@app.post("/medications/check-interactions", response_model=dict, tags=["Clinical Intelligence"])
+async def check_medication_interactions(
+    request: MedicationCheckRequest,
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Check for drug-drug interactions and allergy conflicts.
+    
+    Phase 2.1: Medication Interaction Checking
+    
+    This endpoint performs comprehensive medication safety checks including:
+    - Drug-drug interactions with severity levels
+    - Allergy conflict detection
+    - Condition-based contraindications
+    
+    **Request Body:**
+    - **current_medications**: List of medications patient is currently taking
+    - **new_medications**: New medications being prescribed
+    - **patient_allergies**: Comma-separated string of known allergies
+    - **patient_conditions**: Optional list of medical conditions
+    
+    **Response:**
+    - **drug_interactions**: List of detected drug interactions
+    - **allergy_warnings**: List of allergy conflicts
+    - **contraindications**: List of condition-based contraindications
+    - **summary**: Overall safety assessment
+    - **recommendations**: Prioritized action recommendations
+    """
+    try:
+        med_service = get_medication_service()
+        
+        result = await med_service.comprehensive_medication_check(
+            current_medications=request.current_medications,
+            new_medications=request.new_medications,
+            patient_allergies=request.patient_allergies,
+            patient_conditions=request.patient_conditions
+        )
+        
+        return {
+            "success": True,
+            "check_result": result,
+            "checked_at": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        print(f"Error checking medication interactions: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to check medication interactions"
+        )
+
+@app.post("/patients/{patient_id}/check-medications", response_model=dict, tags=["Clinical Intelligence"])
+async def check_patient_medication_safety(
+    patient_id: int,
+    new_medications: List[str] = Body(..., description="New medications to check"),
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Check medication safety for a specific patient using their profile data.
+    
+    Automatically uses patient's allergies and medical history from their profile.
+    
+    **Path Parameters:**
+    - **patient_id**: ID of the patient
+    
+    **Request Body:**
+    - **new_medications**: List of new medications to check
+    
+    **Response:**
+    - Complete safety check using patient's profile data
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        # Get patient data
+        patient = await db.get_patient_by_id(patient_id, doctor_uid)
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        # Get current medications from recent visits
+        visits = await db.get_visits_by_patient_id(patient_id, doctor_uid)
+        current_meds = []
+        if visits:
+            # Get medications from last visit
+            recent_visit = visits[0]
+            if recent_visit.get("medications"):
+                current_meds = [recent_visit["medications"]]
+        
+        # Extract conditions from medical history
+        med_service = get_medication_service()
+        conditions = med_service._extract_conditions_from_history(
+            patient.get("medical_history", "")
+        )
+        
+        result = await med_service.comprehensive_medication_check(
+            current_medications=current_meds,
+            new_medications=new_medications,
+            patient_allergies=patient.get("allergies", ""),
+            patient_conditions=conditions,
+            patient_context=patient
+        )
+        
+        return {
+            "success": True,
+            "patient_id": patient_id,
+            "patient_name": f"{patient.get('first_name', '')} {patient.get('last_name', '')}",
+            "check_result": result,
+            "current_medications_detected": current_meds,
+            "conditions_detected": conditions,
+            "checked_at": datetime.now(timezone.utc).isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error checking patient medication safety: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to check medication safety"
+        )
+
+# -------------------------------------------------------------------------
+# Visit Summary / SOAP Note Generation (Phase 2.3)
+# -------------------------------------------------------------------------
+
+@app.post("/visits/{visit_id}/generate-summary", response_model=dict, tags=["Clinical Intelligence"])
+async def generate_visit_summary(
+    visit_id: int,
+    request: VisitSummaryRequest = VisitSummaryRequest(),
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Generate AI-powered SOAP note visit summary for documentation.
+    
+    Phase 2.3: Smart Visit Summary Generation
+    
+    Generates a professional SOAP (Subjective, Objective, Assessment, Plan) note
+    from visit data, including AI analyses of reports and handwritten notes.
+    
+    **Path Parameters:**
+    - **visit_id**: ID of the visit
+    
+    **Query Parameters:**
+    - **include_reports**: Include AI report analyses (default: true)
+    - **include_handwritten**: Include handwritten note analyses (default: true)
+    
+    **Response:**
+    - **soap_note**: Structured SOAP data (subjective, objective, assessment, plan)
+    - **soap_note_text**: Formatted text version for display/printing
+    - **icd10_codes**: Suggested ICD-10 codes
+    - **cpt_codes**: Suggested CPT codes
+    """
+    try:
+        check_ai_enabled(current_doctor)
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        # Get visit data
+        visit = await db.get_visit_by_id(visit_id, doctor_uid)
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        # Get patient data
+        patient = await db.get_patient_by_id(visit["patient_id"], doctor_uid)
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        # Check if summary already exists
+        existing_summary = await db.get_visit_summary(visit_id, doctor_uid)
+        if existing_summary:
+            return {
+                "success": True,
+                "message": "Visit summary already exists",
+                "already_exists": True,
+                "summary": existing_summary
+            }
+        
+        # Get reports and analyses if requested
+        reports = []
+        analyses = []
+        if request.include_reports:
+            reports = await db.get_reports_by_visit_id(visit_id, doctor_uid)
+            analyses = await db.get_ai_analyses_by_visit_id(visit_id, doctor_uid)
+        
+        # Get handwritten notes if requested
+        handwritten_notes = None
+        if request.include_handwritten:
+            handwritten_notes = await db.get_handwritten_visit_notes_by_visit_id(visit_id, doctor_uid)
+        
+        # Generate SOAP note
+        result = await ai_analysis_service.generate_visit_summary(
+            patient_context=patient,
+            visit_context=visit,
+            reports=reports,
+            analyses=analyses,
+            doctor_context=current_doctor,
+            handwritten_notes=handwritten_notes
+        )
+        
+        if result.get("success"):
+            # Store the summary
+            summary_data = {
+                "visit_id": visit_id,
+                "patient_id": visit["patient_id"],
+                "doctor_firebase_uid": doctor_uid,
+                "subjective": result.get("soap_note", {}).get("subjective"),
+                "objective": result.get("soap_note", {}).get("objective"),
+                "assessment": result.get("soap_note", {}).get("assessment"),
+                "plan": result.get("soap_note", {}).get("plan"),
+                "soap_note_text": result.get("soap_note_text"),
+                "icd10_codes": result.get("soap_note", {}).get("assessment", {}).get("icd10_codes", []),
+                "cpt_codes": result.get("soap_note", {}).get("plan", {}).get("cpt_codes", []),
+                "confidence_score": result.get("confidence_score"),
+                "model_used": result.get("model_used")
+            }
+            
+            saved_summary = await db.create_visit_summary(summary_data)
+            
+            return {
+                "success": True,
+                "message": "SOAP note generated successfully",
+                "already_exists": False,
+                "summary": saved_summary or result,
+                "generated_at": result.get("generated_at")
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to generate SOAP note: {result.get('error')}"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error generating visit summary: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to generate visit summary"
+        )
+
+@app.get("/visits/{visit_id}/summary", response_model=dict, tags=["Clinical Intelligence"])
+async def get_visit_summary(
+    visit_id: int,
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Get existing visit summary (SOAP note) for a visit.
+    
+    **Path Parameters:**
+    - **visit_id**: ID of the visit
+    
+    **Response:**
+    - **summary**: The SOAP note data if exists
+    - **exists**: Whether a summary exists
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        summary = await db.get_visit_summary(visit_id, doctor_uid)
+        
+        return {
+            "success": True,
+            "exists": summary is not None,
+            "summary": summary
+        }
+    except Exception as e:
+        print(f"Error getting visit summary: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get visit summary"
+        )
+
+@app.post("/visits/{visit_id}/summary/approve", response_model=dict, tags=["Clinical Intelligence"])
+async def approve_visit_summary(
+    visit_id: int,
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Approve a visit summary for final documentation.
+    
+    Marks the summary as reviewed and approved by the doctor.
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        # Get existing summary
+        summary = await db.get_visit_summary(visit_id, doctor_uid)
+        if not summary:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit summary not found. Generate one first."
+            )
+        
+        # Approve
+        success = await db.approve_visit_summary(
+            summary_id=summary["id"],
+            approved_by=doctor_uid
+        )
+        
+        if success:
+            return {
+                "success": True,
+                "message": "Visit summary approved",
+                "approved_at": datetime.now(timezone.utc).isoformat()
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to approve summary"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error approving visit summary: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to approve visit summary"
+        )
+
+# -------------------------------------------------------------------------
+# Patient Risk Scoring (Phase 2.4)
+# -------------------------------------------------------------------------
+
+@app.get("/patients/{patient_id}/risk-score", response_model=dict, tags=["Clinical Intelligence"])
+async def get_patient_risk_score(
+    patient_id: int,
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Get patient risk score.
+    
+    Phase 2.4: Patient Risk Scoring
+    
+    Returns the AI-calculated risk score for a patient, including:
+    - Overall health risk score (0-100)
+    - Category-specific scores (cardiovascular, diabetes, etc.)
+    - Identified risk factors and protective factors
+    - Recommendations for risk reduction
+    
+    **Path Parameters:**
+    - **patient_id**: ID of the patient
+    
+    **Response:**
+    - **risk_scores**: Risk score data if calculated
+    - **exists**: Whether a risk score exists
+    - **calculated_at**: When the score was calculated
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        risk_score = await db.get_patient_risk_score(patient_id, doctor_uid)
+        
+        return {
+            "success": True,
+            "patient_id": patient_id,
+            "exists": risk_score is not None,
+            "risk_scores": risk_score
+        }
+    except Exception as e:
+        print(f"Error getting risk score: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get risk score"
+        )
+
+@app.post("/patients/{patient_id}/calculate-risk-score", response_model=dict, tags=["Clinical Intelligence"])
+async def calculate_patient_risk_score(
+    patient_id: int,
+    request: RiskScoreRequest = RiskScoreRequest(),
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Calculate or recalculate patient risk score.
+    
+    Uses AI to analyze patient's complete medical data and calculate
+    comprehensive risk scores.
+    
+    **Path Parameters:**
+    - **patient_id**: ID of the patient
+    
+    **Query Parameters:**
+    - **recalculate**: Force recalculation even if recent score exists
+    - **include_all_visits**: Include all visits in analysis
+    
+    **Response:**
+    - **risk_scores**: Calculated risk scores
+    - **risk_factors**: Identified risk factors
+    - **recommendations**: AI-generated recommendations
+    """
+    try:
+        check_ai_enabled(current_doctor)
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        # Check for existing recent score
+        if not request.recalculate:
+            existing = await db.get_patient_risk_score(patient_id, doctor_uid)
+            if existing:
+                # Check if recent (within 24 hours)
+                from datetime import timedelta
+                calculated_at = existing.get("calculated_at", "")
+                if calculated_at:
+                    try:
+                        calc_time = datetime.fromisoformat(calculated_at.replace("Z", "+00:00"))
+                        if datetime.now(timezone.utc) - calc_time < timedelta(hours=24):
+                            return {
+                                "success": True,
+                                "message": "Recent risk score exists",
+                                "recalculated": False,
+                                "risk_scores": existing
+                            }
+                    except:
+                        pass
+        
+        # Get patient data
+        patient = await db.get_patient_by_id(patient_id, doctor_uid)
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        # Get visits and analyses
+        visits = await db.get_visits_by_patient_id(patient_id, doctor_uid)
+        analyses = await db.get_ai_analyses_by_patient_id(patient_id, doctor_uid)
+        
+        # Calculate risk score
+        result = await ai_analysis_service.calculate_patient_risk_score(
+            patient_context=patient,
+            visits=visits,
+            analyses=analyses,
+            doctor_context=current_doctor
+        )
+        
+        if result.get("success"):
+            risk_scores = result.get("risk_scores", {})
+            
+            # Store the risk score
+            risk_data = {
+                "patient_id": patient_id,
+                "doctor_firebase_uid": doctor_uid,
+                "overall_risk_score": risk_scores.get("overall_risk_score"),
+                "cardiovascular_risk": risk_scores.get("cardiovascular_risk"),
+                "diabetes_risk": risk_scores.get("diabetes_risk"),
+                "kidney_risk": risk_scores.get("kidney_risk"),
+                "liver_risk": risk_scores.get("liver_risk"),
+                "risk_factors": risk_scores.get("risk_factors", []),
+                "protective_factors": risk_scores.get("protective_factors", []),
+                "recommendations": risk_scores.get("recommendations", []),
+                "confidence_score": risk_scores.get("confidence_score"),
+                "visits_analyzed": result.get("visits_analyzed", len(visits)),
+                "reports_analyzed": result.get("analyses_used", len(analyses))
+            }
+            
+            saved = await db.create_or_update_risk_score(risk_data)
+            
+            return {
+                "success": True,
+                "message": "Risk score calculated successfully",
+                "recalculated": True,
+                "risk_scores": saved or risk_data,
+                "calculated_at": datetime.now(timezone.utc).isoformat()
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to calculate risk score: {result.get('error')}"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error calculating risk score: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to calculate risk score"
+        )
+
+@app.get("/patients/high-risk", response_model=dict, tags=["Clinical Intelligence"])
+async def get_high_risk_patients(
+    min_score: int = Query(default=70, ge=0, le=100, description="Minimum risk score"),
+    limit: int = Query(default=50, ge=1, le=200, description="Maximum results"),
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Get list of high-risk patients for the doctor.
+    
+    Returns patients with risk scores above the specified threshold,
+    sorted by risk score (highest first).
+    
+    **Query Parameters:**
+    - **min_score**: Minimum risk score threshold (default: 70)
+    - **limit**: Maximum number of results (default: 50)
+    
+    **Response:**
+    - **patients**: List of high-risk patients with scores
+    - **count**: Number of high-risk patients
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        high_risk = await db.get_high_risk_patients(
+            doctor_firebase_uid=doctor_uid,
+            min_risk_score=min_score,
+            limit=limit
+        )
+        
+        return {
+            "success": True,
+            "patients": high_risk,
+            "count": len(high_risk),
+            "min_score": min_score
+        }
+    except Exception as e:
+        print(f"Error getting high-risk patients: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get high-risk patients"
+        )
+
+# -------------------------------------------------------------------------
+# Historical Trend Analysis (Phase 2.2)
+# -------------------------------------------------------------------------
+
+@app.get("/patients/{patient_id}/lab-trends", response_model=dict, tags=["Clinical Intelligence"])
+async def get_patient_lab_trends(
+    patient_id: int,
+    parameters: Optional[str] = Query(default=None, description="Comma-separated parameter names"),
+    months: int = Query(default=12, ge=1, le=60, description="Months of history"),
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Get historical lab value trends for a patient.
+    
+    Phase 2.2: Historical Trend Analysis
+    
+    Returns historical lab values grouped by parameter for trend analysis.
+    Useful for tracking how values change over time.
+    
+    **Path Parameters:**
+    - **patient_id**: ID of the patient
+    
+    **Query Parameters:**
+    - **parameters**: Comma-separated list of specific parameters (optional)
+    - **months**: Number of months of history (default: 12, max: 60)
+    
+    **Response:**
+    - **trends**: Dict of parameter -> list of historical values
+    - **parameters_found**: List of parameters with data
+    """
+    try:
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        # Parse parameters if provided
+        param_list = None
+        if parameters:
+            param_list = [p.strip() for p in parameters.split(",") if p.strip()]
+        
+        # Try to get from historical_lab_values table first
+        trends = await db.get_historical_lab_values(
+            patient_id=patient_id,
+            doctor_firebase_uid=doctor_uid,
+            parameters=param_list,
+            months_back=months
+        )
+        
+        # If empty, try to extract from existing analyses
+        if not trends:
+            trends = await db.get_historical_lab_values_from_analyses(
+                patient_id=patient_id,
+                doctor_firebase_uid=doctor_uid,
+                months_back=months
+            )
+        
+        return {
+            "success": True,
+            "patient_id": patient_id,
+            "trends": trends,
+            "parameters_found": list(trends.keys()),
+            "months_analyzed": months
+        }
+    except Exception as e:
+        print(f"Error getting lab trends: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get lab trends"
+        )
+
+@app.post("/reports/{report_id}/analyze-with-trends", response_model=dict, tags=["Clinical Intelligence"])
+async def analyze_report_with_trends(
+    report_id: int,
+    current_doctor: dict = Depends(get_current_doctor)
+):
+    """
+    Analyze a report with historical trend context.
+    
+    Enhanced analysis that compares current values with historical
+    data for better clinical decision support.
+    
+    **Path Parameters:**
+    - **report_id**: ID of the report to analyze
+    
+    **Response:**
+    - **analysis**: AI analysis with trend comparison
+    - **trends_used**: Historical parameters included
+    """
+    try:
+        check_ai_enabled(current_doctor)
+        doctor_uid = current_doctor["firebase_uid"]
+        
+        # Get report
+        report = await db.get_report_by_id(report_id, doctor_uid)
+        if not report:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Report not found"
+            )
+        
+        # Get visit and patient
+        visit = await db.get_visit_by_id(report["visit_id"], doctor_uid)
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        patient = await db.get_patient_by_id(visit["patient_id"], doctor_uid)
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        # Get historical values
+        historical = await db.get_historical_lab_values_from_analyses(
+            patient_id=visit["patient_id"],
+            doctor_firebase_uid=doctor_uid,
+            months_back=12
+        )
+        
+        # Download report file
+        file_content = await file_downloader.download_file_async(report["file_url"])
+        if not file_content:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to download report file"
+            )
+        
+        # Get visit chain if applicable
+        visit_chain = None
+        if visit.get("parent_visit_id"):
+            visit_chain = await db.get_visit_chain(visit["id"], doctor_uid)
+        
+        # Perform analysis with trends
+        result = await ai_analysis_service.analyze_with_historical_trends(
+            file_content=file_content,
+            file_name=report["file_name"],
+            file_type=report["file_type"],
+            patient_context=patient,
+            visit_context=visit,
+            doctor_context=current_doctor,
+            historical_values=historical,
+            visit_chain_context=visit_chain
+        )
+        
+        if result.get("success"):
+            return {
+                "success": True,
+                "analysis": result.get("analysis"),
+                "historical_context_used": result.get("historical_context_used"),
+                "parameters_with_history": result.get("parameters_with_history", []),
+                "processed_at": result.get("processed_at")
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Analysis failed: {result.get('error')}"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error analyzing report with trends: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to analyze report with trends"
+        )
+
+# ============================================================================
+# END OF PHASE 2: CLINICAL INTELLIGENCE ENDPOINTS
+# ============================================================================
 
 @app.post("/patients/{patient_id}/analyze-comprehensive-history", response_model=dict)
 async def analyze_patient_comprehensive_history(

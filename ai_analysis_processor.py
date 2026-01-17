@@ -3,6 +3,7 @@ AI Analysis Background Processor
 
 This service processes queued AI analysis tasks in the background.
 It continuously checks for pending analyses and processes them.
+Now with integrated Clinical Alert generation from AI findings.
 """
 
 import asyncio
@@ -11,11 +12,17 @@ import httpx
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import os
+import logging
 from dotenv import load_dotenv
 from async_file_downloader import file_downloader
 
+# Import alert service for critical findings
+from alert_service import ClinicalAlertService, get_alert_service
+
 # Load environment variables
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 class AIAnalysisProcessor:
     def __init__(self, db_manager, ai_service):
@@ -28,9 +35,17 @@ class AIAnalysisProcessor:
         self.delay_between_analyses = 2  # 2 second delay between each analysis
         self.file_downloader = file_downloader  # Use global async downloader
         
-        print("🔄 AI Analysis Processor initialized")
-        print(f"   Max concurrent: {self.max_concurrent}")
-        print(f"   Delay between analyses: {self.delay_between_analyses}s")
+        # Initialize alert service for critical findings detection
+        self.alert_service: Optional[ClinicalAlertService] = None
+        
+        logger.info("🔄 AI Analysis Processor initialized")
+        logger.info(f"   Max concurrent: {self.max_concurrent}")
+        logger.info(f"   Delay between analyses: {self.delay_between_analyses}s")
+    
+    def _init_alert_service(self):
+        """Initialize the alert service lazily (needs supabase client)"""
+        if self.alert_service is None:
+            self.alert_service = get_alert_service(self.db.supabase)
     
     async def start_processing(self):
         """Start the background processing loop"""
@@ -160,6 +175,10 @@ class AIAnalysisProcessor:
             processing_time = (datetime.now() - start_time).total_seconds() * 1000
             
             if analysis_result["success"]:
+                # Get structured data (either from JSON mode or parsed)
+                structured_analysis = analysis_result["analysis"].get("structured_analysis", {})
+                structured_data = analysis_result["analysis"].get("structured_data", structured_analysis)
+                
                 # Store analysis results with enhanced visit-contextual fields
                 analysis_data = {
                     "report_id": report_id,
@@ -170,18 +189,20 @@ class AIAnalysisProcessor:
                     "model_used": analysis_result["model_used"],
                     "confidence_score": analysis_result["analysis"].get("confidence_score", 0.7),
                     "raw_analysis": analysis_result["analysis"].get("raw_analysis", ""),
-                    # Enhanced visit-contextual fields
-                    "clinical_correlation": analysis_result["analysis"]["structured_analysis"].get("clinical_correlation"),
-                    "detailed_findings": analysis_result["analysis"]["structured_analysis"].get("detailed_findings"),
-                    "critical_findings": analysis_result["analysis"]["structured_analysis"].get("critical_findings"),
-                    "treatment_evaluation": analysis_result["analysis"]["structured_analysis"].get("treatment_evaluation"),
+                    # NEW: Store structured JSON data directly
+                    "structured_data": structured_data if structured_data else None,
+                    # Enhanced visit-contextual fields (for backward compatibility)
+                    "clinical_correlation": structured_analysis.get("clinical_correlation"),
+                    "detailed_findings": structured_analysis.get("detailed_findings") or structured_analysis.get("findings"),
+                    "critical_findings": structured_analysis.get("critical_findings"),
+                    "treatment_evaluation": structured_analysis.get("treatment_evaluation"),
                     # Original fields (keeping for backward compatibility)
-                    "document_summary": analysis_result["analysis"]["structured_analysis"].get("document_summary"),
-                    "clinical_significance": analysis_result["analysis"]["structured_analysis"].get("clinical_significance"),
-                    "correlation_with_patient": analysis_result["analysis"]["structured_analysis"].get("correlation_with_patient"),
-                    "actionable_insights": analysis_result["analysis"]["structured_analysis"].get("actionable_insights"),
-                    "patient_communication": analysis_result["analysis"]["structured_analysis"].get("patient_communication"),
-                    "clinical_notes": analysis_result["analysis"]["structured_analysis"].get("clinical_notes"),
+                    "document_summary": structured_analysis.get("document_summary"),
+                    "clinical_significance": structured_analysis.get("clinical_significance"),
+                    "correlation_with_patient": structured_analysis.get("correlation_with_patient"),
+                    "actionable_insights": structured_analysis.get("actionable_insights"),
+                    "patient_communication": structured_analysis.get("patient_communication"),
+                    "clinical_notes": structured_analysis.get("clinical_notes"),
                     "key_findings": analysis_result["analysis"].get("key_findings", []),
                     "analysis_success": True,
                     "analysis_error": None,
@@ -192,9 +213,27 @@ class AIAnalysisProcessor:
                 
                 created_analysis = await self.db.create_ai_analysis(analysis_data)
                 if created_analysis:
-                    print(f"✅ AI analysis completed for report {report_id} (Queue ID: {queue_id})")
-                    print(f"   Processing time: {processing_time:.0f}ms")
-                    print(f"   Confidence: {analysis_result['analysis']['confidence_score']:.2f}")
+                    logger.info(f"✅ AI analysis completed for report {report_id} (Queue ID: {queue_id})")
+                    logger.info(f"   Processing time: {processing_time:.0f}ms")
+                    logger.info(f"   Confidence: {analysis_result['analysis']['confidence_score']:.2f}")
+                    logger.info(f"   Parsing method: {analysis_result['analysis'].get('parsing_method', 'unknown')}")
+                    
+                    # GENERATE CLINICAL ALERTS from critical findings
+                    try:
+                        self._init_alert_service()
+                        if self.alert_service and structured_data:
+                            alerts_created = await self.alert_service.process_analysis_for_alerts(
+                                analysis_id=str(created_analysis.get("id")),
+                                analysis_data=structured_data,
+                                patient_id=str(patient_id),
+                                doctor_firebase_uid=doctor_firebase_uid,
+                                visit_id=str(visit_id)
+                            )
+                            if alerts_created:
+                                logger.info(f"   🚨 Created {len(alerts_created)} clinical alerts")
+                    except Exception as alert_error:
+                        logger.warning(f"   ⚠️ Alert generation failed (non-critical): {alert_error}")
+                    
                     await self.db.update_ai_analysis_queue_status(queue_id, "completed")
                 else:
                     error_msg = "Failed to save analysis results to database"

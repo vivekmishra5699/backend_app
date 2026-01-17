@@ -22,6 +22,39 @@ CREATE TABLE public.ai_analysis_queue (
   CONSTRAINT fk_queue_report FOREIGN KEY (report_id) REFERENCES public.reports(id),
   CONSTRAINT fk_queue_visit FOREIGN KEY (visit_id) REFERENCES public.visits(id)
 );
+CREATE TABLE public.ai_clinical_alerts (
+  id integer NOT NULL DEFAULT nextval('ai_clinical_alerts_id_seq'::regclass),
+  patient_id integer NOT NULL,
+  visit_id integer,
+  report_id integer,
+  analysis_id integer,
+  doctor_firebase_uid text NOT NULL,
+  alert_type character varying NOT NULL CHECK (alert_type::text = ANY (ARRAY['critical_value'::character varying, 'abnormal_trend'::character varying, 'drug_interaction'::character varying, 'allergy_warning'::character varying, 'urgent_followup'::character varying, 'diagnosis_concern'::character varying, 'treatment_alert'::character varying, 'missed_test'::character varying]::text[])),
+  severity character varying NOT NULL CHECK (severity::text = ANY (ARRAY['critical'::character varying, 'urgent'::character varying, 'high'::character varying, 'medium'::character varying, 'low'::character varying]::text[])),
+  title character varying NOT NULL,
+  message text NOT NULL,
+  parameter_name character varying,
+  parameter_value character varying,
+  reference_range character varying,
+  recommended_action text,
+  is_acknowledged boolean DEFAULT false,
+  acknowledged_at timestamp with time zone,
+  acknowledged_by text,
+  action_taken text,
+  is_dismissed boolean DEFAULT false,
+  dismissed_reason text,
+  source character varying DEFAULT 'ai_analysis'::character varying CHECK (source::text = ANY (ARRAY['ai_analysis'::character varying, 'manual'::character varying, 'system'::character varying, 'medication_check'::character varying]::text[])),
+  metadata jsonb DEFAULT '{}'::jsonb,
+  created_at timestamp with time zone DEFAULT now(),
+  updated_at timestamp with time zone DEFAULT now(),
+  expires_at timestamp with time zone,
+  CONSTRAINT ai_clinical_alerts_pkey PRIMARY KEY (id),
+  CONSTRAINT ai_clinical_alerts_analysis_id_fkey FOREIGN KEY (analysis_id) REFERENCES public.ai_document_analysis(id),
+  CONSTRAINT ai_clinical_alerts_doctor_firebase_uid_fkey FOREIGN KEY (doctor_firebase_uid) REFERENCES public.doctors(firebase_uid),
+  CONSTRAINT ai_clinical_alerts_patient_id_fkey FOREIGN KEY (patient_id) REFERENCES public.patients(id),
+  CONSTRAINT ai_clinical_alerts_report_id_fkey FOREIGN KEY (report_id) REFERENCES public.reports(id),
+  CONSTRAINT ai_clinical_alerts_visit_id_fkey FOREIGN KEY (visit_id) REFERENCES public.visits(id)
+);
 CREATE TABLE public.ai_consolidated_analysis (
   id bigint NOT NULL DEFAULT nextval('ai_consolidated_analysis_id_seq'::regclass),
   visit_id integer NOT NULL,
@@ -76,6 +109,7 @@ CREATE TABLE public.ai_document_analysis (
   detailed_findings text,
   critical_findings text,
   treatment_evaluation text,
+  structured_data jsonb,
   CONSTRAINT ai_document_analysis_pkey PRIMARY KEY (id),
   CONSTRAINT fk_ai_analysis_doctor FOREIGN KEY (doctor_firebase_uid) REFERENCES public.doctors(firebase_uid),
   CONSTRAINT fk_ai_analysis_patient FOREIGN KEY (patient_id) REFERENCES public.patients(id),
@@ -174,6 +208,27 @@ CREATE TABLE public.handwritten_visit_notes (
   CONSTRAINT handwritten_visit_notes_template_id_fkey FOREIGN KEY (template_id) REFERENCES public.pdf_templates(id),
   CONSTRAINT handwritten_visit_notes_visit_id_fkey FOREIGN KEY (visit_id) REFERENCES public.visits(id)
 );
+CREATE TABLE public.historical_lab_values (
+  id integer NOT NULL DEFAULT nextval('historical_lab_values_id_seq'::regclass),
+  patient_id integer NOT NULL,
+  doctor_firebase_uid text NOT NULL,
+  analysis_id integer,
+  parameter_name character varying NOT NULL,
+  parameter_value character varying,
+  numeric_value numeric,
+  unit character varying,
+  reference_range character varying,
+  status character varying,
+  report_id integer,
+  test_date date,
+  recorded_at timestamp with time zone DEFAULT now(),
+  created_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT historical_lab_values_pkey PRIMARY KEY (id),
+  CONSTRAINT historical_lab_values_analysis_id_fkey FOREIGN KEY (analysis_id) REFERENCES public.ai_document_analysis(id),
+  CONSTRAINT historical_lab_values_doctor_firebase_uid_fkey FOREIGN KEY (doctor_firebase_uid) REFERENCES public.doctors(firebase_uid),
+  CONSTRAINT historical_lab_values_patient_id_fkey FOREIGN KEY (patient_id) REFERENCES public.patients(id),
+  CONSTRAINT historical_lab_values_report_id_fkey FOREIGN KEY (report_id) REFERENCES public.reports(id)
+);
 CREATE TABLE public.lab_contacts (
   id integer NOT NULL DEFAULT nextval('lab_contacts_id_seq'::regclass),
   doctor_firebase_uid text NOT NULL,
@@ -232,17 +287,6 @@ CREATE TABLE public.patient_history_analysis (
   model_used text NOT NULL DEFAULT 'gemini-3-pro-preview'::text,
   confidence_score numeric DEFAULT 0.0,
   raw_analysis text NOT NULL,
-  comprehensive_summary text,
-  medical_trajectory text,
-  chronic_conditions ARRAY,
-  recurring_patterns ARRAY,
-  treatment_effectiveness text,
-  risk_factors ARRAY,
-  recommendations ARRAY,
-  significant_findings ARRAY,
-  lifestyle_factors text,
-  medication_history text,
-  follow_up_suggestions ARRAY,
   analysis_success boolean DEFAULT true,
   analysis_error text,
   processing_time_ms integer,
@@ -252,6 +296,31 @@ CREATE TABLE public.patient_history_analysis (
   CONSTRAINT patient_history_analysis_pkey PRIMARY KEY (id),
   CONSTRAINT fk_patient_history_analysis_doctor FOREIGN KEY (doctor_firebase_uid) REFERENCES public.doctors(firebase_uid),
   CONSTRAINT fk_patient_history_analysis_patient FOREIGN KEY (patient_id) REFERENCES public.patients(id)
+);
+CREATE TABLE public.patient_risk_scores (
+  id integer NOT NULL DEFAULT nextval('patient_risk_scores_id_seq'::regclass),
+  patient_id integer NOT NULL,
+  doctor_firebase_uid text NOT NULL,
+  overall_risk_score integer CHECK (overall_risk_score >= 0 AND overall_risk_score <= 100),
+  cardiovascular_risk integer CHECK (cardiovascular_risk >= 0 AND cardiovascular_risk <= 100),
+  diabetes_risk integer CHECK (diabetes_risk >= 0 AND diabetes_risk <= 100),
+  kidney_risk integer CHECK (kidney_risk >= 0 AND kidney_risk <= 100),
+  liver_risk integer CHECK (liver_risk >= 0 AND liver_risk <= 100),
+  respiratory_risk integer CHECK (respiratory_risk >= 0 AND respiratory_risk <= 100),
+  risk_factors jsonb DEFAULT '[]'::jsonb,
+  protective_factors jsonb DEFAULT '[]'::jsonb,
+  recommendations jsonb DEFAULT '[]'::jsonb,
+  data_points_used integer DEFAULT 0,
+  visits_analyzed integer DEFAULT 0,
+  reports_analyzed integer DEFAULT 0,
+  confidence_score numeric CHECK (confidence_score >= 0::numeric AND confidence_score <= 1::numeric),
+  analysis_summary text,
+  calculated_at timestamp with time zone DEFAULT now(),
+  created_at timestamp with time zone DEFAULT now(),
+  updated_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT patient_risk_scores_pkey PRIMARY KEY (id),
+  CONSTRAINT patient_risk_scores_doctor_firebase_uid_fkey FOREIGN KEY (doctor_firebase_uid) REFERENCES public.doctors(firebase_uid),
+  CONSTRAINT patient_risk_scores_patient_id_fkey FOREIGN KEY (patient_id) REFERENCES public.patients(id)
 );
 CREATE TABLE public.patients (
   id bigint NOT NULL DEFAULT nextval('patients_id_seq'::regclass),
@@ -267,7 +336,9 @@ CREATE TABLE public.patients (
   blood_group text,
   allergies text,
   medical_history text,
-  -- Prior medical history fields (added 2026-01-09)
+  created_by_doctor text NOT NULL,
+  created_at timestamp with time zone DEFAULT now(),
+  updated_at timestamp with time zone DEFAULT now(),
   consulted_other_doctor boolean DEFAULT false,
   previous_doctor_name text,
   previous_doctor_specialization text,
@@ -277,16 +348,12 @@ CREATE TABLE public.patients (
   previous_diagnosis text,
   previous_medications jsonb DEFAULT '[]'::jsonb,
   previous_medications_duration text,
-  medication_response text CHECK (medication_response IS NULL OR medication_response = ANY (ARRAY['improved', 'partial improvement', 'no change', 'worsened']::text[])),
+  medication_response text CHECK (medication_response IS NULL OR (medication_response = ANY (ARRAY['improved'::text, 'partial improvement'::text, 'no change'::text, 'worsened'::text]))),
   previous_tests_done text,
   previous_test_results text,
   reason_for_new_consultation text,
   ongoing_treatment boolean DEFAULT false,
   current_medications jsonb DEFAULT '[]'::jsonb,
-  -- End prior medical history fields
-  created_by_doctor text NOT NULL,
-  created_at timestamp with time zone DEFAULT now(),
-  updated_at timestamp with time zone DEFAULT now(),
   CONSTRAINT patients_pkey PRIMARY KEY (id)
 );
 CREATE TABLE public.pdf_templates (
@@ -452,6 +519,33 @@ CREATE TABLE public.visit_reports (
   CONSTRAINT visit_reports_patient_id_fkey FOREIGN KEY (patient_id) REFERENCES public.patients(id),
   CONSTRAINT visit_reports_template_id_fkey FOREIGN KEY (template_id) REFERENCES public.pdf_templates(id),
   CONSTRAINT visit_reports_visit_id_fkey FOREIGN KEY (visit_id) REFERENCES public.visits(id)
+);
+CREATE TABLE public.visit_summaries (
+  id integer NOT NULL DEFAULT nextval('visit_summaries_id_seq'::regclass),
+  visit_id integer NOT NULL UNIQUE,
+  patient_id integer NOT NULL,
+  doctor_firebase_uid text NOT NULL,
+  subjective jsonb,
+  objective jsonb,
+  assessment jsonb,
+  plan jsonb,
+  soap_note_text text,
+  icd10_codes jsonb DEFAULT '[]'::jsonb,
+  cpt_codes jsonb DEFAULT '[]'::jsonb,
+  ai_generated boolean DEFAULT true,
+  manually_edited boolean DEFAULT false,
+  approved boolean DEFAULT false,
+  approved_at timestamp with time zone,
+  approved_by text,
+  confidence_score numeric,
+  model_used character varying,
+  generated_at timestamp with time zone DEFAULT now(),
+  created_at timestamp with time zone DEFAULT now(),
+  updated_at timestamp with time zone DEFAULT now(),
+  CONSTRAINT visit_summaries_pkey PRIMARY KEY (id),
+  CONSTRAINT visit_summaries_doctor_firebase_uid_fkey FOREIGN KEY (doctor_firebase_uid) REFERENCES public.doctors(firebase_uid),
+  CONSTRAINT visit_summaries_patient_id_fkey FOREIGN KEY (patient_id) REFERENCES public.patients(id),
+  CONSTRAINT visit_summaries_visit_id_fkey FOREIGN KEY (visit_id) REFERENCES public.visits(id)
 );
 CREATE TABLE public.visits (
   id bigint NOT NULL DEFAULT nextval('visits_id_seq'::regclass),

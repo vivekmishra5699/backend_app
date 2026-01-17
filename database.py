@@ -553,14 +553,25 @@ class DatabaseManager:
             return None
 
     async def get_ai_analysis_by_report_id(self, report_id: int, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
-        """Get AI analysis for a specific report"""
+        """Get AI analysis for a specific report (CACHED)"""
         try:
+            # Check cache first
+            if self.cache:
+                cache_key = f"ai_analysis_report:{report_id}:{doctor_firebase_uid}"
+                cached_result = await self.cache.get(cache_key)
+                if cached_result is not None:
+                    return cached_result
+            
             # Async Supabase call
             response = await self.supabase.table("ai_document_analysis").select("*").eq("report_id", report_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             
-            if response.data:
-                return response.data[0]
-            return None
+            result = response.data[0] if response.data else None
+            
+            # Cache result
+            if self.cache and result:
+                await self.cache.set(cache_key, result, ttl=300)  # Cache for 5 minutes
+            
+            return result
         except Exception as e:
             print(f"Error fetching AI analysis by report ID: {e}")
             return None
@@ -591,12 +602,25 @@ class DatabaseManager:
             return []
 
     async def get_ai_analyses_by_patient_id(self, patient_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
-        """Get all AI analyses for a patient"""
+        """Get all AI analyses for a patient (CACHED)"""
         try:
+            # Check cache first
+            if self.cache:
+                cache_key = f"ai_analyses_patient:{patient_id}:{doctor_firebase_uid}"
+                cached_result = await self.cache.get(cache_key)
+                if cached_result is not None:
+                    return cached_result
+            
             # Async Supabase call
             response = await self.supabase.table("ai_document_analysis").select("*").eq("patient_id", patient_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("analyzed_at", desc=True).execute()
             
-            return response.data if response.data else []
+            result = response.data if response.data else []
+            
+            # Cache result
+            if self.cache:
+                await self.cache.set(cache_key, result, ttl=300)  # Cache for 5 minutes
+            
+            return result
         except Exception as e:
             print(f"Error fetching AI analyses by patient ID: {e}")
             return []
@@ -830,6 +854,246 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error getting queue stats: {e}")
             return {"pending": 0, "processing": 0, "completed": 0, "failed": 0, "total": 0}
+
+    # =========================================================================
+    # CLINICAL ALERTS (AI-GENERATED)
+    # =========================================================================
+    
+    async def create_clinical_alert(self, alert_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Create a new clinical alert from AI analysis"""
+        try:
+            response = await self.supabase.table("ai_clinical_alerts").insert(alert_data).execute()
+            
+            if response.data:
+                # Invalidate related caches
+                if self.cache:
+                    doctor_uid = alert_data.get("doctor_firebase_uid")
+                    patient_id = alert_data.get("patient_id")
+                    if doctor_uid:
+                        await self.cache.delete(f"alerts_doctor:{doctor_uid}")
+                        await self.cache.delete(f"alert_counts:{doctor_uid}")
+                    if patient_id and doctor_uid:
+                        await self.cache.delete(f"alerts_patient:{patient_id}:{doctor_uid}")
+                
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error creating clinical alert: {e}")
+            return None
+
+    async def get_unacknowledged_alerts(
+        self, 
+        doctor_firebase_uid: str, 
+        patient_id: int = None,
+        severity: str = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Get unacknowledged clinical alerts for a doctor (CACHED)"""
+        try:
+            # Build cache key based on parameters
+            cache_key = f"alerts_doctor:{doctor_firebase_uid}"
+            if patient_id:
+                cache_key = f"alerts_patient:{patient_id}:{doctor_firebase_uid}"
+            if severity:
+                cache_key += f":{severity}"
+            
+            # Check cache first
+            if self.cache:
+                cached_result = await self.cache.get(cache_key)
+                if cached_result is not None:
+                    return cached_result[:limit]
+            
+            # Build query
+            query = self.supabase.table("ai_clinical_alerts") \
+                .select("*") \
+                .eq("doctor_firebase_uid", doctor_firebase_uid) \
+                .eq("acknowledged", False) \
+                .order("created_at", desc=True) \
+                .limit(limit)
+            
+            if patient_id:
+                query = query.eq("patient_id", patient_id)
+            
+            if severity:
+                query = query.eq("severity", severity)
+            
+            response = await query.execute()
+            result = response.data if response.data else []
+            
+            # Cache result
+            if self.cache:
+                await self.cache.set(cache_key, result, ttl=60)  # Cache for 1 minute (alerts change frequently)
+            
+            return result
+        except Exception as e:
+            print(f"Error getting unacknowledged alerts: {e}")
+            return []
+
+    async def get_alert_counts(self, doctor_firebase_uid: str) -> Dict[str, int]:
+        """Get alert counts by severity for a doctor (CACHED)"""
+        try:
+            # Check cache first
+            if self.cache:
+                cache_key = f"alert_counts:{doctor_firebase_uid}"
+                cached_result = await self.cache.get(cache_key)
+                if cached_result is not None:
+                    return cached_result
+            
+            # Try to use the database function
+            try:
+                response = await self.supabase.rpc(
+                    "get_alert_counts",
+                    {"p_doctor_uid": doctor_firebase_uid}
+                ).execute()
+                
+                if response.data and len(response.data) > 0:
+                    counts = response.data[0]
+                    result = {
+                        "high": counts.get("high_count", 0),
+                        "medium": counts.get("medium_count", 0),
+                        "low": counts.get("low_count", 0),
+                        "total": counts.get("total_count", 0)
+                    }
+                    
+                    # Cache result
+                    if self.cache:
+                        await self.cache.set(cache_key, result, ttl=60)
+                    
+                    return result
+            except Exception as rpc_error:
+                print(f"RPC get_alert_counts failed, falling back to manual count: {rpc_error}")
+            
+            # Fallback: manual counting
+            alerts = await self.get_unacknowledged_alerts(doctor_firebase_uid, limit=1000)
+            counts = {"high": 0, "medium": 0, "low": 0, "total": 0}
+            for alert in alerts:
+                severity = alert.get("severity", "low")
+                counts[severity] = counts.get(severity, 0) + 1
+                counts["total"] += 1
+            
+            # Cache result
+            if self.cache:
+                await self.cache.set(cache_key, counts, ttl=60)
+            
+            return counts
+        except Exception as e:
+            print(f"Error getting alert counts: {e}")
+            return {"high": 0, "medium": 0, "low": 0, "total": 0}
+
+    async def acknowledge_alert(
+        self, 
+        alert_id: str, 
+        doctor_firebase_uid: str,
+        notes: str = None
+    ) -> bool:
+        """Acknowledge a clinical alert"""
+        try:
+            update_data = {
+                "acknowledged": True,
+                "acknowledged_at": datetime.now(timezone.utc).isoformat(),
+                "acknowledged_by": doctor_firebase_uid
+            }
+            
+            if notes:
+                update_data["acknowledgment_notes"] = notes
+            
+            response = await self.supabase.table("ai_clinical_alerts") \
+                .update(update_data) \
+                .eq("id", alert_id) \
+                .eq("doctor_firebase_uid", doctor_firebase_uid) \
+                .execute()
+            
+            success = len(response.data) > 0 if response.data else False
+            
+            # Invalidate caches
+            if success and self.cache:
+                await self.cache.delete(f"alerts_doctor:{doctor_firebase_uid}")
+                await self.cache.delete(f"alert_counts:{doctor_firebase_uid}")
+            
+            return success
+        except Exception as e:
+            print(f"Error acknowledging alert {alert_id}: {e}")
+            return False
+
+    async def acknowledge_all_patient_alerts(
+        self, 
+        patient_id: int, 
+        doctor_firebase_uid: str
+    ) -> int:
+        """Acknowledge all alerts for a patient, returns count acknowledged"""
+        try:
+            update_data = {
+                "acknowledged": True,
+                "acknowledged_at": datetime.now(timezone.utc).isoformat(),
+                "acknowledged_by": doctor_firebase_uid
+            }
+            
+            response = await self.supabase.table("ai_clinical_alerts") \
+                .update(update_data) \
+                .eq("patient_id", patient_id) \
+                .eq("doctor_firebase_uid", doctor_firebase_uid) \
+                .eq("acknowledged", False) \
+                .execute()
+            
+            count = len(response.data) if response.data else 0
+            
+            # Invalidate caches
+            if count > 0 and self.cache:
+                await self.cache.delete(f"alerts_doctor:{doctor_firebase_uid}")
+                await self.cache.delete(f"alerts_patient:{patient_id}:{doctor_firebase_uid}")
+                await self.cache.delete(f"alert_counts:{doctor_firebase_uid}")
+            
+            return count
+        except Exception as e:
+            print(f"Error acknowledging alerts for patient {patient_id}: {e}")
+            return 0
+
+    async def get_alerts_for_visit(
+        self, 
+        visit_id: int, 
+        doctor_firebase_uid: str
+    ) -> List[Dict[str, Any]]:
+        """Get all alerts for a specific visit"""
+        try:
+            response = await self.supabase.table("ai_clinical_alerts") \
+                .select("*") \
+                .eq("visit_id", visit_id) \
+                .eq("doctor_firebase_uid", doctor_firebase_uid) \
+                .order("severity", desc=True) \
+                .execute()
+            
+            return response.data if response.data else []
+        except Exception as e:
+            print(f"Error getting alerts for visit {visit_id}: {e}")
+            return []
+
+    async def get_patient_alert_history(
+        self, 
+        patient_id: int, 
+        doctor_firebase_uid: str,
+        days: int = 90,
+        include_acknowledged: bool = True
+    ) -> List[Dict[str, Any]]:
+        """Get alert history for a patient"""
+        try:
+            from datetime import timedelta
+            since_date = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            
+            query = self.supabase.table("ai_clinical_alerts") \
+                .select("*") \
+                .eq("patient_id", patient_id) \
+                .eq("doctor_firebase_uid", doctor_firebase_uid) \
+                .gte("created_at", since_date) \
+                .order("created_at", desc=True)
+            
+            if not include_acknowledged:
+                query = query.eq("acknowledged", False)
+            
+            response = await query.execute()
+            return response.data if response.data else []
+        except Exception as e:
+            print(f"Error getting patient alert history: {e}")
+            return []
 
 
     # Report related operations
@@ -3348,3 +3612,390 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error getting appointment statistics: {e}")
             return {"total_appointments": 0, "scheduled": 0, "confirmed": 0, "in_progress": 0, "completed": 0, "cancelled": 0, "no_show": 0}
+
+    # ==========================================================================
+    # PHASE 2: CLINICAL INTELLIGENCE DATABASE METHODS
+    # ==========================================================================
+    
+    # -------------------------------------------------------------------------
+    # Patient Risk Scores
+    # -------------------------------------------------------------------------
+    
+    async def create_or_update_risk_score(self, risk_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Create or update patient risk score"""
+        try:
+            patient_id = risk_data.get("patient_id")
+            doctor_uid = risk_data.get("doctor_firebase_uid")
+            
+            # Check if exists
+            existing = await self.get_patient_risk_score(patient_id, doctor_uid)
+            
+            if existing:
+                # Update existing
+                risk_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+                risk_data["calculated_at"] = datetime.now(timezone.utc).isoformat()
+                response = await self.supabase.table("patient_risk_scores")\
+                    .update(risk_data)\
+                    .eq("patient_id", patient_id)\
+                    .eq("doctor_firebase_uid", doctor_uid)\
+                    .execute()
+            else:
+                # Create new
+                risk_data["calculated_at"] = datetime.now(timezone.utc).isoformat()
+                risk_data["created_at"] = datetime.now(timezone.utc).isoformat()
+                response = await self.supabase.table("patient_risk_scores")\
+                    .insert(risk_data)\
+                    .execute()
+            
+            if response.data:
+                # Invalidate cache
+                if self.cache:
+                    await self.cache.delete(f"risk_score:{patient_id}:{doctor_uid}")
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error creating/updating risk score: {e}")
+            return None
+    
+    async def get_patient_risk_score(self, patient_id: int, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
+        """Get risk score for a patient (CACHED)"""
+        try:
+            if self.cache:
+                cache_key = f"risk_score:{patient_id}:{doctor_firebase_uid}"
+                cached = await self.cache.get(cache_key)
+                if cached is not None:
+                    return cached
+            
+            response = await self.supabase.table("patient_risk_scores")\
+                .select("*")\
+                .eq("patient_id", patient_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .execute()
+            
+            result = response.data[0] if response.data else None
+            
+            if self.cache and result:
+                await self.cache.set(cache_key, result, ttl=600)
+            
+            return result
+        except Exception as e:
+            print(f"Error getting risk score: {e}")
+            return None
+    
+    async def get_high_risk_patients(
+        self, 
+        doctor_firebase_uid: str, 
+        min_risk_score: int = 70,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Get all high-risk patients for a doctor"""
+        try:
+            response = await self.supabase.table("patient_risk_scores")\
+                .select("*, patients!inner(id, first_name, last_name, phone, date_of_birth)")\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .gte("overall_risk_score", min_risk_score)\
+                .order("overall_risk_score", desc=True)\
+                .limit(limit)\
+                .execute()
+            
+            return response.data if response.data else []
+        except Exception as e:
+            print(f"Error getting high-risk patients: {e}")
+            return []
+    
+    # -------------------------------------------------------------------------
+    # Visit Summaries (SOAP Notes)
+    # -------------------------------------------------------------------------
+    
+    async def create_visit_summary(self, summary_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Create a new visit summary (SOAP note)"""
+        try:
+            summary_data["generated_at"] = datetime.now(timezone.utc).isoformat()
+            summary_data["created_at"] = datetime.now(timezone.utc).isoformat()
+            
+            response = await self.supabase.table("visit_summaries")\
+                .insert(summary_data)\
+                .execute()
+            
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error creating visit summary: {e}")
+            return None
+    
+    async def get_visit_summary(self, visit_id: int, doctor_firebase_uid: str) -> Optional[Dict[str, Any]]:
+        """Get visit summary for a visit"""
+        try:
+            response = await self.supabase.table("visit_summaries")\
+                .select("*")\
+                .eq("visit_id", visit_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .execute()
+            
+            return response.data[0] if response.data else None
+        except Exception as e:
+            print(f"Error getting visit summary: {e}")
+            return None
+    
+    async def update_visit_summary(
+        self, 
+        summary_id: int, 
+        update_data: Dict[str, Any]
+    ) -> bool:
+        """Update a visit summary"""
+        try:
+            update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+            update_data["manually_edited"] = True
+            
+            response = await self.supabase.table("visit_summaries")\
+                .update(update_data)\
+                .eq("id", summary_id)\
+                .execute()
+            
+            return bool(response.data)
+        except Exception as e:
+            print(f"Error updating visit summary: {e}")
+            return False
+    
+    async def approve_visit_summary(
+        self, 
+        summary_id: int, 
+        approved_by: str
+    ) -> bool:
+        """Approve a visit summary"""
+        try:
+            update_data = {
+                "approved": True,
+                "approved_at": datetime.now(timezone.utc).isoformat(),
+                "approved_by": approved_by,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+            
+            response = await self.supabase.table("visit_summaries")\
+                .update(update_data)\
+                .eq("id", summary_id)\
+                .execute()
+            
+            return bool(response.data)
+        except Exception as e:
+            print(f"Error approving visit summary: {e}")
+            return False
+    
+    # -------------------------------------------------------------------------
+    # Historical Lab Values (for Trend Analysis)
+    # -------------------------------------------------------------------------
+    
+    async def store_historical_lab_value(self, lab_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Store a historical lab value for trend tracking"""
+        try:
+            lab_data["recorded_at"] = datetime.now(timezone.utc).isoformat()
+            lab_data["created_at"] = datetime.now(timezone.utc).isoformat()
+            
+            response = await self.supabase.table("historical_lab_values")\
+                .insert(lab_data)\
+                .execute()
+            
+            return response.data[0] if response.data else None
+        except Exception as e:
+            print(f"Error storing historical lab value: {e}")
+            return None
+    
+    async def bulk_store_historical_lab_values(self, lab_values: List[Dict[str, Any]]) -> int:
+        """Bulk store multiple historical lab values"""
+        try:
+            if not lab_values:
+                return 0
+            
+            now = datetime.now(timezone.utc).isoformat()
+            for val in lab_values:
+                val["recorded_at"] = now
+                val["created_at"] = now
+            
+            response = await self.supabase.table("historical_lab_values")\
+                .insert(lab_values)\
+                .execute()
+            
+            return len(response.data) if response.data else 0
+        except Exception as e:
+            print(f"Error bulk storing lab values: {e}")
+            return 0
+    
+    async def get_historical_lab_values(
+        self,
+        patient_id: int,
+        doctor_firebase_uid: str,
+        parameters: Optional[List[str]] = None,
+        months_back: int = 12
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Get historical lab values for trend analysis.
+        
+        Returns dict of parameter_name -> list of historical values sorted by date
+        """
+        try:
+            from datetime import timedelta
+            cutoff_date = (datetime.now() - timedelta(days=months_back * 30)).date().isoformat()
+            
+            query = self.supabase.table("historical_lab_values")\
+                .select("*")\
+                .eq("patient_id", patient_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .gte("test_date", cutoff_date)\
+                .order("test_date", desc=False)
+            
+            response = await query.execute()
+            
+            if not response.data:
+                return {}
+            
+            # Group by parameter
+            historical = {}
+            for record in response.data:
+                param = record.get("parameter_name", "").lower()
+                
+                # Filter by specific parameters if requested
+                if parameters and param not in [p.lower() for p in parameters]:
+                    continue
+                
+                if param not in historical:
+                    historical[param] = []
+                
+                historical[param].append({
+                    "test_date": record.get("test_date"),
+                    "value": record.get("parameter_value"),
+                    "numeric_value": record.get("numeric_value"),
+                    "unit": record.get("unit"),
+                    "status": record.get("status"),
+                    "reference_range": record.get("reference_range")
+                })
+            
+            return historical
+        except Exception as e:
+            print(f"Error getting historical lab values: {e}")
+            return {}
+    
+    async def get_historical_lab_values_from_analyses(
+        self,
+        patient_id: int,
+        doctor_firebase_uid: str,
+        months_back: int = 12
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Extract historical lab values from existing AI analyses.
+        
+        This extracts findings from the structured_data field of ai_document_analysis.
+        """
+        try:
+            from datetime import timedelta
+            cutoff_date = (datetime.now() - timedelta(days=months_back * 30)).isoformat()
+            
+            # Get analyses with structured data
+            response = await self.supabase.table("ai_document_analysis")\
+                .select("id, analyzed_at, structured_data")\
+                .eq("patient_id", patient_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .gte("analyzed_at", cutoff_date)\
+                .not_.is_("structured_data", "null")\
+                .order("analyzed_at", desc=False)\
+                .execute()
+            
+            if not response.data:
+                return {}
+            
+            historical = {}
+            for analysis in response.data:
+                structured = analysis.get("structured_data")
+                if not structured:
+                    continue
+                
+                # Handle both string and dict structured_data
+                if isinstance(structured, str):
+                    try:
+                        import json
+                        structured = json.loads(structured)
+                    except:
+                        continue
+                
+                findings = structured.get("findings", [])
+                analyzed_date = analysis.get("analyzed_at", "")[:10]  # Extract date part
+                
+                for finding in findings:
+                    param = finding.get("parameter", "").lower()
+                    if not param:
+                        continue
+                    
+                    if param not in historical:
+                        historical[param] = []
+                    
+                    historical[param].append({
+                        "test_date": analyzed_date,
+                        "value": finding.get("value"),
+                        "unit": finding.get("unit"),
+                        "status": finding.get("status"),
+                        "reference_range": finding.get("reference_range"),
+                        "analysis_id": analysis.get("id")
+                    })
+            
+            return historical
+        except Exception as e:
+            print(f"Error extracting historical values from analyses: {e}")
+            return {}
+    
+    async def extract_and_store_lab_values_from_analysis(
+        self,
+        analysis_id: int,
+        patient_id: int,
+        doctor_firebase_uid: str,
+        structured_data: Dict[str, Any],
+        report_id: Optional[int] = None,
+        test_date: Optional[str] = None
+    ) -> int:
+        """
+        Extract findings from AI analysis and store as historical lab values.
+        
+        Called after successful AI analysis to populate trend data.
+        """
+        try:
+            findings = structured_data.get("findings", [])
+            if not findings:
+                return 0
+            
+            lab_values = []
+            for finding in findings:
+                param_name = finding.get("parameter")
+                if not param_name:
+                    continue
+                
+                # Try to extract numeric value
+                value_str = finding.get("value", "")
+                numeric_val = None
+                try:
+                    # Extract first number from value string
+                    import re
+                    numbers = re.findall(r'[\d.]+', str(value_str))
+                    if numbers:
+                        numeric_val = float(numbers[0])
+                except:
+                    pass
+                
+                lab_values.append({
+                    "patient_id": patient_id,
+                    "doctor_firebase_uid": doctor_firebase_uid,
+                    "analysis_id": analysis_id,
+                    "report_id": report_id,
+                    "parameter_name": param_name,
+                    "parameter_value": value_str,
+                    "numeric_value": numeric_val,
+                    "unit": finding.get("unit"),
+                    "reference_range": finding.get("reference_range"),
+                    "status": finding.get("status"),
+                    "test_date": test_date or datetime.now().date().isoformat()
+                })
+            
+            if lab_values:
+                return await self.bulk_store_historical_lab_values(lab_values)
+            return 0
+        except Exception as e:
+            print(f"Error extracting and storing lab values: {e}")
+            return 0

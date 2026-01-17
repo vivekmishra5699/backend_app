@@ -14,6 +14,18 @@ import requests
 from pathlib import Path
 import tempfile
 import concurrent.futures
+import json
+import logging
+
+# Import JSON schemas for structured output
+from ai_schemas import (
+    DOCUMENT_ANALYSIS_SCHEMA,
+    HANDWRITTEN_ANALYSIS_SCHEMA,
+    COMPREHENSIVE_HISTORY_SCHEMA,
+    CONSOLIDATED_ANALYSIS_SCHEMA
+)
+
+logger = logging.getLogger(__name__)
 
 class AIAnalysisService:
     def __init__(self):
@@ -633,9 +645,15 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
         self, 
         prompt: str, 
         document_data: Dict[str, Any],
-        max_retries: int = 3
+        max_retries: int = 3,
+        use_json_mode: bool = True
     ) -> Dict[str, Any]:
-        """Perform the actual AI analysis using Gemini 3 Pro with retry logic for rate limits"""
+        """
+        Perform the actual AI analysis using Gemini 3 Pro with retry logic for rate limits.
+        
+        Now uses JSON structured output mode for reliable parsing.
+        Falls back to text mode only if JSON parsing fails.
+        """
         
         for attempt in range(max_retries):
             try:
@@ -659,16 +677,32 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
                 
                 # Generate response using Gemini 3 Pro via Vertex AI
                 # Using LOW thinking level for faster responses in document analysis
+                # Now with JSON structured output for reliable parsing
                 def generate_sync():
-                    return self.client.models.generate_content(
-                        model=self.model_name,
-                        contents=content_parts,
-                        config=types.GenerateContentConfig(
-                            thinking_config=types.ThinkingConfig(
-                                thinking_level=types.ThinkingLevel.LOW  # Fast, low-latency for document analysis
+                    if use_json_mode:
+                        # Use JSON mode with structured schema
+                        return self.client.models.generate_content(
+                            model=self.model_name,
+                            contents=content_parts,
+                            config=types.GenerateContentConfig(
+                                thinking_config=types.ThinkingConfig(
+                                    thinking_level=types.ThinkingLevel.LOW
+                                ),
+                                response_mime_type="application/json",
+                                response_schema=DOCUMENT_ANALYSIS_SCHEMA
                             )
                         )
-                    )
+                    else:
+                        # Fallback to text mode
+                        return self.client.models.generate_content(
+                            model=self.model_name,
+                            contents=content_parts,
+                            config=types.GenerateContentConfig(
+                                thinking_config=types.ThinkingConfig(
+                                    thinking_level=types.ThinkingLevel.LOW
+                                )
+                            )
+                        )
                 
                 response = await loop.run_in_executor(
                     self.executor,
@@ -678,16 +712,49 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
                 if response and response.text:
                     analysis_text = response.text
                     
-                    # Parse the structured response
-                    parsed_analysis = self._parse_analysis_response(analysis_text)
-                    
-                    return {
-                        "raw_analysis": analysis_text,
-                        "structured_analysis": parsed_analysis,
-                        "confidence_score": self._calculate_confidence(analysis_text),
-                        "analysis_length": len(analysis_text),
-                        "key_findings": self._extract_key_findings(parsed_analysis)
-                    }
+                    if use_json_mode:
+                        # Parse JSON response directly
+                        try:
+                            structured_analysis = json.loads(analysis_text)
+                            
+                            # Calculate confidence from structured data
+                            confidence_score = self._calculate_confidence_from_structured(structured_analysis)
+                            
+                            # Extract key findings from structured data
+                            key_findings = self._extract_key_findings_from_structured(structured_analysis)
+                            
+                            return {
+                                "raw_analysis": analysis_text,
+                                "structured_analysis": structured_analysis,
+                                "confidence_score": confidence_score,
+                                "analysis_length": len(analysis_text),
+                                "key_findings": key_findings,
+                                "structured_data": structured_analysis,  # New field for direct storage
+                                "parsing_method": "json_mode"
+                            }
+                        except json.JSONDecodeError as je:
+                            logger.warning(f"JSON parsing failed, falling back to text parsing: {je}")
+                            # Fall back to text parsing
+                            parsed_analysis = self._parse_analysis_response(analysis_text)
+                            return {
+                                "raw_analysis": analysis_text,
+                                "structured_analysis": parsed_analysis,
+                                "confidence_score": self._calculate_confidence(analysis_text),
+                                "analysis_length": len(analysis_text),
+                                "key_findings": self._extract_key_findings(parsed_analysis),
+                                "parsing_method": "text_fallback"
+                            }
+                    else:
+                        # Legacy text parsing mode
+                        parsed_analysis = self._parse_analysis_response(analysis_text)
+                        return {
+                            "raw_analysis": analysis_text,
+                            "structured_analysis": parsed_analysis,
+                            "confidence_score": self._calculate_confidence(analysis_text),
+                            "analysis_length": len(analysis_text),
+                            "key_findings": self._extract_key_findings(parsed_analysis),
+                            "parsing_method": "text_mode"
+                        }
                 else:
                     return {
                         "error": "No response from AI model",
@@ -705,11 +772,11 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
                     if attempt < max_retries - 1:
                         # Exponential backoff: 2, 4, 8 seconds
                         wait_time = 2 ** (attempt + 1)
-                        print(f"⚠️ Rate limit hit. Retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
+                        logger.warning(f"Rate limit hit. Retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
                         await asyncio.sleep(wait_time)
                         continue
                     else:
-                        print(f"❌ Rate limit exceeded after {max_retries} attempts")
+                        logger.error(f"Rate limit exceeded after {max_retries} attempts")
                         return {
                             "error": "Rate limit exceeded. Please try again later.",
                             "raw_analysis": "",
@@ -719,8 +786,8 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
                         }
                 else:
                     # Other errors - don't retry
-                    print(f"Error in Gemini 3 Pro analysis: {e}")
-                    print(f"Traceback: {traceback.format_exc()}")
+                    logger.error(f"Error in Gemini 3 Pro analysis: {e}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
                     return {
                         "error": error_message,
                         "raw_analysis": "",
@@ -737,6 +804,80 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
             "confidence_score": 0.0,
             "key_findings": []
         }
+    
+    def _calculate_confidence_from_structured(self, structured_data: Dict[str, Any]) -> float:
+        """Calculate confidence score from structured JSON response"""
+        try:
+            base_score = 0.75
+            
+            # Check for presence of key fields
+            if structured_data.get("findings") and len(structured_data["findings"]) > 0:
+                base_score += 0.05
+            
+            if structured_data.get("critical_findings") is not None:
+                base_score += 0.03
+            
+            if structured_data.get("clinical_correlation"):
+                base_score += 0.05
+            
+            if structured_data.get("treatment_evaluation"):
+                base_score += 0.03
+            
+            if structured_data.get("actionable_insights") and len(structured_data["actionable_insights"]) > 0:
+                base_score += 0.04
+            
+            # Deduct for critical findings (indicates serious condition, lower confidence in good outcome)
+            critical_count = len(structured_data.get("critical_findings", []))
+            if critical_count > 0:
+                # More critical findings = slightly lower confidence due to complexity
+                base_score -= min(0.05, critical_count * 0.01)
+            
+            return min(0.95, max(0.5, base_score))
+            
+        except Exception as e:
+            logger.warning(f"Error calculating confidence from structured data: {e}")
+            return 0.7
+    
+    def _extract_key_findings_from_structured(self, structured_data: Dict[str, Any]) -> List[str]:
+        """Extract key findings from structured JSON response"""
+        try:
+            key_findings = []
+            
+            # Add critical findings first
+            for critical in structured_data.get("critical_findings", [])[:3]:
+                finding = critical.get("finding", "")
+                if finding:
+                    key_findings.append(f"⚠️ {finding}")
+            
+            # Add treatment evaluation summary
+            treatment = structured_data.get("treatment_evaluation", {})
+            if treatment:
+                if not treatment.get("current_treatment_appropriate"):
+                    key_findings.append("Treatment modification may be needed")
+                elif treatment.get("treatment_response") in ["excellent", "good"]:
+                    key_findings.append("Good response to current treatment")
+            
+            # Add high-priority actionable insights
+            for insight in structured_data.get("actionable_insights", [])[:2]:
+                if insight.get("priority") in ["immediate", "high"]:
+                    key_findings.append(insight.get("action", ""))
+            
+            # Add clinical correlation summary
+            correlation = structured_data.get("clinical_correlation", {})
+            if correlation.get("supports_diagnosis"):
+                key_findings.append("Results support working diagnosis")
+            elif correlation.get("supports_diagnosis") is False:
+                key_findings.append("Results may not support current diagnosis")
+            
+            # Default if no findings
+            if not key_findings:
+                key_findings.append("Analysis completed successfully")
+            
+            return key_findings[:5]
+            
+        except Exception as e:
+            logger.warning(f"Error extracting key findings from structured data: {e}")
+            return ["Analysis completed"]
     
     def _parse_analysis_response(self, analysis_text: str) -> Dict[str, Any]:
         """Parse the structured analysis response from Gemini.
@@ -921,7 +1062,7 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
                 individual_analyses, patient_context, visit_context, doctor_context
             )
             
-            # Generate consolidated insights using Gemini 3 Pro
+            # Generate consolidated insights using Gemini 3 Pro with JSON mode
             loop = asyncio.get_event_loop()
             
             def generate_consolidated():
@@ -931,7 +1072,9 @@ This analysis should help Dr. {doctor_name} provide better care for {patient_nam
                     config=types.GenerateContentConfig(
                         thinking_config=types.ThinkingConfig(
                             thinking_level=types.ThinkingLevel.HIGH  # High reasoning for consolidated analysis
-                        )
+                        ),
+                        response_mime_type="application/json",
+                        response_schema=CONSOLIDATED_ANALYSIS_SCHEMA
                     )
                 )
             
@@ -1059,6 +1202,7 @@ Focus on creating a cohesive medical narrative that helps Dr. {doctor_name} make
             )
             
             # Perform analysis using Gemini 3 Pro with HIGH thinking for complex reasoning
+            # Now using JSON mode for structured output
             loop = asyncio.get_event_loop()
             
             def generate_comprehensive():
@@ -1068,7 +1212,9 @@ Focus on creating a cohesive medical narrative that helps Dr. {doctor_name} make
                     config=types.GenerateContentConfig(
                         thinking_config=types.ThinkingConfig(
                             thinking_level=types.ThinkingLevel.HIGH  # High reasoning for comprehensive history analysis
-                        )
+                        ),
+                        response_mime_type="application/json",
+                        response_schema=COMPREHENSIVE_HISTORY_SCHEMA
                     )
                 )
             
@@ -1079,30 +1225,36 @@ Focus on creating a cohesive medical narrative that helps Dr. {doctor_name} make
             
             if response and response.text:
                 analysis_text = response.text
+                
+                # Try to parse as JSON for structured data
+                try:
+                    structured_analysis = json.loads(analysis_text)
+                    return {
+                        "success": True,
+                        "comprehensive_analysis": analysis_text,
+                        "structured_data": structured_analysis,
+                        "confidence_score": 0.85,
+                        "processed_at": datetime.now(timezone.utc).isoformat(),
+                        "parsing_method": "json_mode"
+                    }
+                except json.JSONDecodeError:
+                    # Fall back to raw text
+                    return {
+                        "success": True,
+                        "comprehensive_analysis": analysis_text,
+                        "confidence_score": 0.80,
+                        "processed_at": datetime.now(timezone.utc).isoformat(),
+                        "parsing_method": "text_fallback"
+                    }
             else:
                 return {
                     "success": False,
                     "error": "No response from AI model"
                 }
             
-            if not analysis_text:
-                return {
-                    "success": False,
-                    "error": "Failed to generate analysis text"
-                }
-            
-            # Return raw analysis - frontend handles formatting/parsing
-            # This saves processing time and avoids unreliable text parsing
-            return {
-                "success": True,
-                "comprehensive_analysis": analysis_text,
-                "confidence_score": 0.85,
-                "processed_at": datetime.now(timezone.utc).isoformat()
-            }
-            
         except Exception as e:
-            print(f"Error in comprehensive history analysis: {e}")
-            print(f"Traceback: {traceback.format_exc()}")
+            logger.error(f"Error in comprehensive history analysis: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return {
                 "success": False,
                 "error": str(e)
@@ -1843,9 +1995,14 @@ This analysis will help ensure accurate medical records and patient safety by pr
         self,
         prompt: str,
         document_data: Dict[str, Any],
-        max_retries: int = 3
+        max_retries: int = 3,
+        use_json_mode: bool = True
     ) -> Dict[str, Any]:
-        """Perform AI analysis on handwritten prescription using Gemini 3 Pro multimodal"""
+        """
+        Perform AI analysis on handwritten prescription using Gemini 3 Pro multimodal.
+        
+        Now uses JSON structured output mode for reliable parsing.
+        """
         
         for attempt in range(max_retries):
             try:
@@ -1862,16 +2019,30 @@ This analysis will help ensure accurate medical records and patient safety by pr
                 
                 # Use HIGH thinking level for handwritten analysis 
                 # as it requires more reasoning to interpret handwriting
+                # Now with JSON structured output for reliable parsing
                 def generate_sync():
-                    return self.client.models.generate_content(
-                        model=self.model_name,
-                        contents=content_parts,
-                        config=types.GenerateContentConfig(
-                            thinking_config=types.ThinkingConfig(
-                                thinking_level=types.ThinkingLevel.HIGH  # High reasoning for handwriting interpretation
+                    if use_json_mode:
+                        return self.client.models.generate_content(
+                            model=self.model_name,
+                            contents=content_parts,
+                            config=types.GenerateContentConfig(
+                                thinking_config=types.ThinkingConfig(
+                                    thinking_level=types.ThinkingLevel.HIGH
+                                ),
+                                response_mime_type="application/json",
+                                response_schema=HANDWRITTEN_ANALYSIS_SCHEMA
                             )
                         )
-                    )
+                    else:
+                        return self.client.models.generate_content(
+                            model=self.model_name,
+                            contents=content_parts,
+                            config=types.GenerateContentConfig(
+                                thinking_config=types.ThinkingConfig(
+                                    thinking_level=types.ThinkingLevel.HIGH
+                                )
+                            )
+                        )
                 
                 response = await loop.run_in_executor(
                     self.executor,
@@ -1881,18 +2052,56 @@ This analysis will help ensure accurate medical records and patient safety by pr
                 if response and response.text:
                     analysis_text = response.text
                     
-                    # Parse the structured response for handwritten prescriptions
-                    parsed_analysis = self._parse_handwritten_analysis_response(analysis_text)
-                    
-                    return {
-                        "raw_analysis": analysis_text,
-                        "structured_analysis": parsed_analysis,
-                        "confidence_score": self._calculate_handwriting_confidence(analysis_text),
-                        "analysis_length": len(analysis_text),
-                        "extracted_medications": parsed_analysis.get("medications", []),
-                        "extracted_diagnosis": parsed_analysis.get("diagnosis", ""),
-                        "legibility_score": parsed_analysis.get("legibility_score", 7)
-                    }
+                    if use_json_mode:
+                        try:
+                            # Parse JSON response directly
+                            structured_analysis = json.loads(analysis_text)
+                            
+                            # Extract key data from structured response
+                            medications = structured_analysis.get("medications", [])
+                            diagnosis = structured_analysis.get("diagnosis", {})
+                            diagnosis_text = diagnosis.get("primary_diagnosis", "") if isinstance(diagnosis, dict) else str(diagnosis)
+                            legibility = structured_analysis.get("document_quality", {})
+                            legibility_score = legibility.get("legibility_score", 7) if isinstance(legibility, dict) else 7
+                            
+                            return {
+                                "raw_analysis": analysis_text,
+                                "structured_analysis": structured_analysis,
+                                "confidence_score": self._calculate_handwriting_confidence_from_structured(structured_analysis),
+                                "analysis_length": len(analysis_text),
+                                "extracted_medications": medications,
+                                "extracted_diagnosis": diagnosis_text,
+                                "legibility_score": legibility_score,
+                                "structured_data": structured_analysis,  # New field for direct storage
+                                "parsing_method": "json_mode"
+                            }
+                        except json.JSONDecodeError as je:
+                            logger.warning(f"JSON parsing failed for handwritten analysis, falling back: {je}")
+                            # Fall back to text parsing
+                            parsed_analysis = self._parse_handwritten_analysis_response(analysis_text)
+                            return {
+                                "raw_analysis": analysis_text,
+                                "structured_analysis": parsed_analysis,
+                                "confidence_score": self._calculate_handwriting_confidence(analysis_text),
+                                "analysis_length": len(analysis_text),
+                                "extracted_medications": parsed_analysis.get("medications", []),
+                                "extracted_diagnosis": parsed_analysis.get("diagnosis", ""),
+                                "legibility_score": parsed_analysis.get("legibility_score", 7),
+                                "parsing_method": "text_fallback"
+                            }
+                    else:
+                        # Legacy text parsing mode
+                        parsed_analysis = self._parse_handwritten_analysis_response(analysis_text)
+                        return {
+                            "raw_analysis": analysis_text,
+                            "structured_analysis": parsed_analysis,
+                            "confidence_score": self._calculate_handwriting_confidence(analysis_text),
+                            "analysis_length": len(analysis_text),
+                            "extracted_medications": parsed_analysis.get("medications", []),
+                            "extracted_diagnosis": parsed_analysis.get("diagnosis", ""),
+                            "legibility_score": parsed_analysis.get("legibility_score", 7),
+                            "parsing_method": "text_mode"
+                        }
                 else:
                     return {
                         "error": "No response from AI model",
@@ -1908,11 +2117,11 @@ This analysis will help ensure accurate medical records and patient safety by pr
                 if "429" in error_message or "Resource exhausted" in error_message or "RESOURCE_EXHAUSTED" in error_message:
                     if attempt < max_retries - 1:
                         wait_time = 2 ** (attempt + 1)
-                        print(f"⚠️ Rate limit hit. Retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
+                        logger.warning(f"Rate limit hit. Retrying in {wait_time}s (attempt {attempt + 1}/{max_retries})...")
                         await asyncio.sleep(wait_time)
                         continue
                     else:
-                        print(f"❌ Rate limit exceeded after {max_retries} attempts")
+                        logger.error(f"Rate limit exceeded after {max_retries} attempts")
                         return {
                             "error": "Rate limit exceeded. Please try again later.",
                             "raw_analysis": "",
@@ -1920,8 +2129,8 @@ This analysis will help ensure accurate medical records and patient safety by pr
                             "confidence_score": 0.0
                         }
                 else:
-                    print(f"❌ Error in handwritten analysis: {e}")
-                    print(f"Traceback: {traceback.format_exc()}")
+                    logger.error(f"Error in handwritten analysis: {e}")
+                    logger.error(f"Traceback: {traceback.format_exc()}")
                     return {
                         "error": error_message,
                         "raw_analysis": "",
@@ -1935,6 +2144,40 @@ This analysis will help ensure accurate medical records and patient safety by pr
             "structured_analysis": {},
             "confidence_score": 0.0
         }
+    
+    def _calculate_handwriting_confidence_from_structured(self, structured_data: Dict[str, Any]) -> float:
+        """Calculate confidence score from structured handwritten analysis response"""
+        try:
+            base_score = 0.70
+            
+            # Check document quality
+            doc_quality = structured_data.get("document_quality", {})
+            legibility = doc_quality.get("legibility_score", 5) if isinstance(doc_quality, dict) else 5
+            base_score += (legibility - 5) * 0.02  # Adjust based on legibility (5 is neutral)
+            
+            # Check for medications extracted
+            meds = structured_data.get("medications", [])
+            if meds and len(meds) > 0:
+                base_score += 0.05
+                # Check if medications have complete info
+                complete_meds = sum(1 for m in meds if m.get("dosage") and m.get("frequency"))
+                base_score += min(0.05, complete_meds * 0.01)
+            
+            # Check for diagnosis
+            if structured_data.get("diagnosis"):
+                base_score += 0.05
+            
+            # Check for safety concerns flagged
+            safety = structured_data.get("safety_check", {})
+            if safety.get("allergy_conflicts") or safety.get("drug_interactions"):
+                # If safety issues detected, slightly reduce confidence (complexity indicator)
+                base_score -= 0.03
+            
+            return min(0.95, max(0.4, base_score))
+            
+        except Exception as e:
+            logger.warning(f"Error calculating handwriting confidence from structured data: {e}")
+            return 0.65
     
     def _parse_handwritten_analysis_response(self, analysis_text: str) -> Dict[str, Any]:
         """Parse the handwritten prescription analysis response"""
@@ -2054,6 +2297,519 @@ This analysis will help ensure accurate medical records and patient safety by pr
         except:
             return 0.6
     
+    # ==========================================================================
+    # PHASE 2: CLINICAL INTELLIGENCE METHODS
+    # ==========================================================================
+    
+    async def generate_visit_summary(
+        self,
+        patient_context: Dict[str, Any],
+        visit_context: Dict[str, Any],
+        reports: List[Dict[str, Any]],
+        analyses: List[Dict[str, Any]],
+        doctor_context: Dict[str, Any],
+        handwritten_notes: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate a professional SOAP note visit summary for documentation.
+        
+        Phase 2.3: Smart Visit Summary Generation
+        
+        Args:
+            patient_context: Patient information
+            visit_context: Current visit details
+            reports: Medical reports from this visit
+            analyses: AI analyses from this visit
+            doctor_context: Doctor information
+            handwritten_notes: Optional handwritten notes
+            
+        Returns:
+            SOAP note structured data
+        """
+        try:
+            logger.info(f"Generating visit summary for visit {visit_context.get('id')}")
+            
+            # Import SOAP schema
+            from ai_schemas import SOAP_NOTE_SCHEMA
+            
+            # Build the prompt
+            prompt = self._create_visit_summary_prompt(
+                patient_context, visit_context, reports, analyses,
+                doctor_context, handwritten_notes
+            )
+            
+            # Generate using Gemini with JSON mode
+            loop = asyncio.get_event_loop()
+            
+            def generate_soap():
+                return self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        thinking_config=types.ThinkingConfig(
+                            thinking_level=types.ThinkingLevel.MEDIUM
+                        ),
+                        response_mime_type="application/json",
+                        response_schema=SOAP_NOTE_SCHEMA
+                    )
+                )
+            
+            response = await loop.run_in_executor(self.executor, generate_soap)
+            
+            if response and response.text:
+                try:
+                    soap_data = json.loads(response.text)
+                    
+                    # Generate text version of SOAP note
+                    soap_text = self._format_soap_note_text(soap_data)
+                    
+                    return {
+                        "success": True,
+                        "soap_note": soap_data,
+                        "soap_note_text": soap_text,
+                        "confidence_score": 0.85,
+                        "generated_at": datetime.now(timezone.utc).isoformat(),
+                        "model_used": self.model_name
+                    }
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse SOAP JSON: {e}")
+                    return {
+                        "success": True,
+                        "soap_note_text": response.text,
+                        "confidence_score": 0.70,
+                        "generated_at": datetime.now(timezone.utc).isoformat(),
+                        "parsing_method": "text_fallback"
+                    }
+            else:
+                return {"success": False, "error": "No response from AI model"}
+                
+        except Exception as e:
+            logger.error(f"Error generating visit summary: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def _create_visit_summary_prompt(
+        self,
+        patient_context: Dict[str, Any],
+        visit_context: Dict[str, Any],
+        reports: List[Dict[str, Any]],
+        analyses: List[Dict[str, Any]],
+        doctor_context: Dict[str, Any],
+        handwritten_notes: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        """Create prompt for SOAP note generation"""
+        
+        patient_name = f"{patient_context.get('first_name', '')} {patient_context.get('last_name', '')}"
+        patient_age = self._calculate_age(patient_context.get('date_of_birth', ''))
+        doctor_name = f"Dr. {doctor_context.get('first_name', '')} {doctor_context.get('last_name', '')}"
+        
+        # Format vitals
+        vitals_text = "Not recorded"
+        vitals = visit_context.get('vitals', {})
+        if vitals:
+            vitals_parts = []
+            if vitals.get('blood_pressure_systolic') and vitals.get('blood_pressure_diastolic'):
+                vitals_parts.append(f"BP: {vitals['blood_pressure_systolic']}/{vitals['blood_pressure_diastolic']} mmHg")
+            if vitals.get('heart_rate'):
+                vitals_parts.append(f"HR: {vitals['heart_rate']} bpm")
+            if vitals.get('temperature'):
+                vitals_parts.append(f"Temp: {vitals['temperature']}°C")
+            if vitals.get('respiratory_rate'):
+                vitals_parts.append(f"RR: {vitals['respiratory_rate']}/min")
+            if vitals.get('oxygen_saturation'):
+                vitals_parts.append(f"SpO2: {vitals['oxygen_saturation']}%")
+            if vitals.get('weight'):
+                vitals_parts.append(f"Wt: {vitals['weight']} kg")
+            if vitals_parts:
+                vitals_text = ", ".join(vitals_parts)
+        
+        # Format analyses summary
+        analyses_summary = ""
+        if analyses:
+            analyses_summary = "\n**AI Analysis Findings:**\n"
+            for analysis in analyses[:3]:
+                doc_summary = analysis.get('document_summary', analysis.get('structured_data', {}).get('document_summary', ''))
+                if doc_summary:
+                    analyses_summary += f"- {str(doc_summary)[:300]}\n"
+        
+        prompt = f"""
+Generate a professional medical visit summary in SOAP format for documentation.
+
+**PATIENT INFORMATION:**
+- Name: {patient_name}
+- Age: {patient_age}
+- Gender: {patient_context.get('gender', 'Not specified')}
+- Blood Group: {patient_context.get('blood_group', 'Not specified')}
+- Allergies: {patient_context.get('allergies', 'None known')}
+- Medical History: {patient_context.get('medical_history', 'None documented')}
+
+**VISIT DETAILS:**
+- Date: {visit_context.get('visit_date', 'Not specified')}
+- Visit Type: {visit_context.get('visit_type', 'General')}
+- Doctor: {doctor_name} ({doctor_context.get('specialization', 'General Medicine')})
+
+**CLINICAL DATA:**
+- Chief Complaint: {visit_context.get('chief_complaint', 'Not specified')}
+- Presenting Symptoms: {visit_context.get('symptoms', 'Not documented')}
+- Vitals: {vitals_text}
+- Clinical Examination: {visit_context.get('clinical_examination', 'Not documented')}
+- Diagnosis: {visit_context.get('diagnosis', 'Pending')}
+- Treatment Plan: {visit_context.get('treatment_plan', 'Not specified')}
+- Medications: {visit_context.get('medications', 'None prescribed')}
+- Tests Recommended: {visit_context.get('tests_recommended', 'None')}
+- Follow-up: {visit_context.get('follow_up_date', 'Not scheduled')}
+
+**REPORTS REVIEWED:** {len(reports)} document(s)
+{analyses_summary}
+
+**INSTRUCTIONS:**
+Generate a concise, professional SOAP note that includes:
+
+1. **Subjective (S):** Patient's reported symptoms, history of present illness, relevant medical history
+2. **Objective (O):** Vital signs, physical examination findings, lab/imaging results
+3. **Assessment (A):** Diagnosis with clinical reasoning, differential diagnoses if applicable
+4. **Plan (P):** Treatment plan, medications, follow-up instructions, patient education
+
+Also provide:
+- ICD-10 codes for documented diagnoses (if determinable)
+- CPT codes for any procedures (if applicable)
+- Clinical reasoning for the assessment
+- Prognosis if appropriate
+
+The note should be suitable for medical records and insurance documentation.
+"""
+        return prompt
+    
+    def _format_soap_note_text(self, soap_data: Dict[str, Any]) -> str:
+        """Format structured SOAP data into readable text"""
+        lines = ["=" * 60, "SOAP NOTE", "=" * 60, ""]
+        
+        # Subjective
+        subj = soap_data.get("subjective", {})
+        lines.append("SUBJECTIVE:")
+        lines.append("-" * 40)
+        if subj.get("chief_complaint"):
+            lines.append(f"Chief Complaint: {subj['chief_complaint']}")
+        if subj.get("history_of_present_illness"):
+            lines.append(f"HPI: {subj['history_of_present_illness']}")
+        if subj.get("past_medical_history"):
+            lines.append(f"PMH: {subj['past_medical_history']}")
+        if subj.get("medications"):
+            lines.append(f"Medications: {subj['medications']}")
+        if subj.get("allergies"):
+            lines.append(f"Allergies: {subj['allergies']}")
+        lines.append("")
+        
+        # Objective
+        obj = soap_data.get("objective", {})
+        lines.append("OBJECTIVE:")
+        lines.append("-" * 40)
+        if obj.get("vital_signs"):
+            lines.append(f"Vitals: {obj['vital_signs']}")
+        if obj.get("physical_examination"):
+            lines.append(f"Physical Exam: {obj['physical_examination']}")
+        if obj.get("laboratory_results"):
+            lines.append(f"Labs: {obj['laboratory_results']}")
+        if obj.get("imaging_results"):
+            lines.append(f"Imaging: {obj['imaging_results']}")
+        lines.append("")
+        
+        # Assessment
+        assess = soap_data.get("assessment", {})
+        lines.append("ASSESSMENT:")
+        lines.append("-" * 40)
+        if assess.get("primary_diagnosis"):
+            lines.append(f"Primary Dx: {assess['primary_diagnosis']}")
+        if assess.get("differential_diagnoses"):
+            lines.append(f"Differentials: {', '.join(assess['differential_diagnoses'])}")
+        if assess.get("icd10_codes"):
+            lines.append(f"ICD-10: {', '.join(assess['icd10_codes'])}")
+        if assess.get("clinical_reasoning"):
+            lines.append(f"Reasoning: {assess['clinical_reasoning']}")
+        lines.append("")
+        
+        # Plan
+        plan = soap_data.get("plan", {})
+        lines.append("PLAN:")
+        lines.append("-" * 40)
+        if plan.get("treatment_plan"):
+            lines.append(f"Treatment: {plan['treatment_plan']}")
+        if plan.get("medications_prescribed"):
+            lines.append(f"Rx: {', '.join(plan['medications_prescribed'])}")
+        if plan.get("follow_up_instructions"):
+            lines.append(f"Follow-up: {plan['follow_up_instructions']}")
+        if plan.get("patient_education"):
+            lines.append(f"Education: {plan['patient_education']}")
+        if plan.get("cpt_codes"):
+            lines.append(f"CPT: {', '.join(plan['cpt_codes'])}")
+        
+        lines.append("")
+        lines.append("=" * 60)
+        
+        return "\n".join(lines)
+    
+    async def calculate_patient_risk_score(
+        self,
+        patient_context: Dict[str, Any],
+        visits: List[Dict[str, Any]],
+        analyses: List[Dict[str, Any]],
+        doctor_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Calculate comprehensive patient risk scores using AI analysis.
+        
+        Phase 2.4: Patient Risk Scoring
+        
+        Args:
+            patient_context: Patient demographics and history
+            visits: List of patient visits
+            analyses: Previous AI analyses
+            doctor_context: Doctor information
+            
+        Returns:
+            Risk score assessment
+        """
+        try:
+            logger.info(f"Calculating risk score for patient {patient_context.get('id')}")
+            
+            from ai_schemas import RISK_SCORE_SCHEMA
+            
+            # Build comprehensive prompt
+            prompt = self._create_risk_score_prompt(
+                patient_context, visits, analyses, doctor_context
+            )
+            
+            loop = asyncio.get_event_loop()
+            
+            def generate_risk():
+                return self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        thinking_config=types.ThinkingConfig(
+                            thinking_level=types.ThinkingLevel.HIGH
+                        ),
+                        response_mime_type="application/json",
+                        response_schema=RISK_SCORE_SCHEMA
+                    )
+                )
+            
+            response = await loop.run_in_executor(self.executor, generate_risk)
+            
+            if response and response.text:
+                try:
+                    risk_data = json.loads(response.text)
+                    return {
+                        "success": True,
+                        "risk_scores": risk_data,
+                        "calculated_at": datetime.now(timezone.utc).isoformat(),
+                        "visits_analyzed": len(visits),
+                        "analyses_used": len(analyses),
+                        "model_used": self.model_name
+                    }
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse risk score JSON: {e}")
+                    return {
+                        "success": False,
+                        "error": "Failed to parse AI response",
+                        "raw_response": response.text
+                    }
+            else:
+                return {"success": False, "error": "No response from AI model"}
+                
+        except Exception as e:
+            logger.error(f"Error calculating risk score: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def _create_risk_score_prompt(
+        self,
+        patient_context: Dict[str, Any],
+        visits: List[Dict[str, Any]],
+        analyses: List[Dict[str, Any]],
+        doctor_context: Dict[str, Any]
+    ) -> str:
+        """Create prompt for patient risk score calculation"""
+        
+        patient_age = self._calculate_age(patient_context.get('date_of_birth', ''))
+        
+        # Summarize visits
+        visits_summary = ""
+        if visits:
+            visits_summary = f"\n**Visit History ({len(visits)} visits):**\n"
+            for v in visits[:10]:  # Last 10 visits
+                visits_summary += f"- {v.get('visit_date', 'N/A')}: {v.get('chief_complaint', 'N/A')} → {v.get('diagnosis', 'N/A')}\n"
+        
+        # Summarize analyses findings
+        analyses_summary = ""
+        if analyses:
+            analyses_summary = "\n**Key Findings from Reports:**\n"
+            for a in analyses[:5]:
+                structured = a.get('structured_data', {})
+                findings = structured.get('findings', [])
+                critical = structured.get('critical_findings', [])
+                if critical:
+                    for cf in critical[:2]:
+                        analyses_summary += f"- ⚠️ {cf.get('finding', 'Critical finding')}\n"
+                for f in findings[:3]:
+                    if f.get('status') in ['high', 'low', 'critical_high', 'critical_low']:
+                        analyses_summary += f"- {f.get('parameter', 'Unknown')}: {f.get('value', '')} ({f.get('status', '')})\n"
+        
+        prompt = f"""
+Analyze this patient's complete medical data and calculate comprehensive risk scores.
+
+**PATIENT DEMOGRAPHICS:**
+- Age: {patient_age}
+- Gender: {patient_context.get('gender', 'Not specified')}
+- Blood Group: {patient_context.get('blood_group', 'Not specified')}
+- Known Allergies: {patient_context.get('allergies', 'None')}
+- Medical History: {patient_context.get('medical_history', 'None documented')}
+
+{visits_summary}
+{analyses_summary}
+
+**RISK ASSESSMENT INSTRUCTIONS:**
+
+Based on all available data, calculate the following risk scores (0-100, where 100 is highest risk):
+
+1. **Overall Health Risk Score**: Combined assessment of all risk factors
+2. **Cardiovascular Risk**: Based on BP, lipids, age, lifestyle factors
+3. **Diabetes Risk**: Based on glucose levels, BMI, family history
+4. **Kidney Risk**: Based on creatinine, eGFR, urinalysis findings
+5. **Liver Risk**: Based on LFTs, lifestyle factors
+
+Also identify:
+- **Risk Factors**: Conditions or findings that increase health risk
+- **Protective Factors**: Positive health indicators
+- **Recommendations**: Actionable steps to reduce risk
+
+Use established medical risk frameworks (Framingham, ASCVD, etc.) as reference.
+Consider patient's age, gender, and medical history in all assessments.
+"""
+        return prompt
+    
+    async def analyze_with_historical_trends(
+        self,
+        file_content: bytes,
+        file_name: str,
+        file_type: str,
+        patient_context: Dict[str, Any],
+        visit_context: Dict[str, Any],
+        doctor_context: Dict[str, Any],
+        historical_values: Dict[str, List[Dict[str, Any]]],
+        visit_chain_context: Optional[List[Dict[str, Any]]] = None
+    ) -> Dict[str, Any]:
+        """
+        Analyze document with historical trend data for better clinical context.
+        
+        Phase 2.2: Historical Trend Analysis
+        
+        Args:
+            file_content: Document content
+            file_name: Name of file
+            file_type: MIME type
+            patient_context: Patient information
+            visit_context: Current visit
+            doctor_context: Doctor information
+            historical_values: Dict of parameter -> list of historical values
+            visit_chain_context: Linked visit history
+            
+        Returns:
+            Analysis with trend comparison
+        """
+        try:
+            logger.info(f"Analyzing {file_name} with historical trends")
+            
+            # Prepare document
+            document_data = await self._prepare_document(file_content, file_name, file_type)
+            if not document_data:
+                return {"success": False, "error": "Unable to process document format"}
+            
+            # Create enhanced prompt with historical data
+            prompt = self._create_analysis_prompt_with_trends(
+                patient_context, visit_context, doctor_context,
+                file_name, historical_values, visit_chain_context
+            )
+            
+            # Perform analysis
+            analysis_result = await self._perform_gemini_analysis(prompt, document_data)
+            
+            if "error" in analysis_result:
+                return {"success": False, "error": analysis_result["error"]}
+            
+            return {
+                "success": True,
+                "analysis": analysis_result,
+                "historical_context_used": bool(historical_values),
+                "parameters_with_history": list(historical_values.keys()) if historical_values else [],
+                "processed_at": datetime.now(timezone.utc).isoformat()
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in trend analysis: {e}")
+            return {"success": False, "error": str(e)}
+    
+    def _create_analysis_prompt_with_trends(
+        self,
+        patient_context: Dict[str, Any],
+        visit_context: Dict[str, Any],
+        doctor_context: Dict[str, Any],
+        file_name: str,
+        historical_values: Dict[str, List[Dict[str, Any]]],
+        visit_chain_context: Optional[List[Dict[str, Any]]] = None
+    ) -> str:
+        """Create analysis prompt enhanced with historical trend data"""
+        
+        # Start with base prompt
+        base_prompt = self._create_analysis_prompt(
+            patient_context, visit_context, doctor_context,
+            file_name, visit_chain_context
+        )
+        
+        # Build trend section
+        trend_section = ""
+        if historical_values:
+            trend_section = """
+═══════════════════════════════════════════════════════════════
+**📊 HISTORICAL VALUES FOR TREND ANALYSIS:**
+═══════════════════════════════════════════════════════════════
+Compare current results with these previous values:
+
+"""
+            for parameter, history in historical_values.items():
+                trend_section += f"**{parameter}:**\n"
+                for entry in history[-5:]:  # Last 5 values
+                    date = entry.get('test_date', entry.get('recorded_at', 'Unknown'))
+                    value = entry.get('value', entry.get('parameter_value', 'N/A'))
+                    status = entry.get('status', '')
+                    status_str = f" [{status}]" if status else ""
+                    trend_section += f"  - {date}: {value}{status_str}\n"
+                trend_section += "\n"
+            
+            trend_section += """
+⚠️ **TREND ANALYSIS INSTRUCTIONS:**
+1. Calculate the trend direction for each parameter (improving/worsening/stable)
+2. Calculate rate of change if concerning
+3. Flag any values crossing from normal to abnormal
+4. Note if trends indicate treatment effectiveness or failure
+5. Predict trajectory if current trend continues
+6. Compare current values directly with historical ranges
+7. Identify any sudden changes that need attention
+
+Include a dedicated "TREND ANALYSIS" section in your response.
+═══════════════════════════════════════════════════════════════
+
+"""
+        
+        # Insert trend section after patient info
+        if "CURRENT VISIT CONTEXT" in base_prompt:
+            base_prompt = base_prompt.replace(
+                "**CURRENT VISIT CONTEXT",
+                f"{trend_section}**CURRENT VISIT CONTEXT"
+            )
+        else:
+            base_prompt = trend_section + base_prompt
+        
+        return base_prompt
+
     def __del__(self):
         """Cleanup thread pool executor"""
         if hasattr(self, 'executor'):
