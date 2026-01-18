@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, EmailStr, ValidationError, Field
 from datetime import datetime, timezone, timedelta, timedelta
 from typing import Optional, List, Dict, Any
+from enum import Enum
 from supabase import create_client, Client, AsyncClient
 from dotenv import load_dotenv
 import firebase_admin
@@ -1236,10 +1237,10 @@ class VisitCreate(BaseModel):
     tests_recommended: Optional[str] = None
     follow_up_date: Optional[str] = None
     notes: Optional[str] = None
-    # New handwritten notes fields
+    # Handwritten notes fields
     note_input_type: Optional[str] = "typed"  # typed, handwritten
     selected_template_id: Optional[int] = None  # For handwritten notes
-    # New billing fields
+    # Billing fields
     consultation_fee: Optional[float] = None
     additional_charges: Optional[float] = None
     total_amount: Optional[float] = None
@@ -1248,9 +1249,9 @@ class VisitCreate(BaseModel):
     payment_date: Optional[str] = None
     discount: Optional[float] = None
     notes_billing: Optional[str] = None
-    # Linked visits feature - for follow-up visits
-    parent_visit_id: Optional[int] = None  # Link to previous visit for context
-    link_reason: Optional[str] = None  # Reason for follow-up (e.g., "Follow-up for treatment")
+    # Case-based architecture - group visits by medical problem
+    case_id: Optional[int] = None  # Link to patient case/episode of care
+    is_case_opener: bool = False  # True if this is the first visit for a case
 
 class VisitUpdate(BaseModel):
     visit_date: Optional[str] = None
@@ -1266,10 +1267,10 @@ class VisitUpdate(BaseModel):
     tests_recommended: Optional[str] = None
     follow_up_date: Optional[str] = None
     notes: Optional[str] = None
-    # New handwritten notes fields
+    # Handwritten notes fields
     note_input_type: Optional[str] = None
     selected_template_id: Optional[int] = None
-    # New billing fields
+    # Billing fields
     consultation_fee: Optional[float] = None
     additional_charges: Optional[float] = None
     total_amount: Optional[float] = None
@@ -1278,9 +1279,10 @@ class VisitUpdate(BaseModel):
     payment_date: Optional[str] = None
     discount: Optional[float] = None
     notes_billing: Optional[str] = None
-    # Linked visits feature
-    parent_visit_id: Optional[int] = None
-    link_reason: Optional[str] = None
+    # Case-based architecture - group visits by medical problem
+    case_id: Optional[int] = None  # Link to patient case/episode of care
+    is_case_opener: Optional[bool] = None  # True if this is the first visit for a case
+
 
 class Visit(BaseModel):
     id: int
@@ -1315,14 +1317,285 @@ class Visit(BaseModel):
     payment_date: Optional[str]
     discount: Optional[float]
     notes_billing: Optional[str]
-    # Linked visits feature
-    parent_visit_id: Optional[int] = None
-    link_reason: Optional[str] = None
+    # Case-based architecture (replaces deprecated parent_visit_id)
+    case_id: Optional[int] = None
+    is_case_opener: Optional[bool] = False
+
+# ============================================================
+# CASE/EPISODE OF CARE MODELS
+# ============================================================
+
+class CaseType(str, Enum):
+    ACUTE = "acute"
+    CHRONIC = "chronic"
+    PREVENTIVE = "preventive"
+    PROCEDURE = "procedure"
+    OTHER = "other"
+
+class CaseStatus(str, Enum):
+    ACTIVE = "active"
+    RESOLVED = "resolved"
+    ONGOING = "ongoing"  # For chronic conditions
+    REFERRED = "referred"
+    CLOSED = "closed"
+    ON_HOLD = "on_hold"
+
+class CaseSeverity(str, Enum):
+    MILD = "mild"
+    MODERATE = "moderate"
+    SEVERE = "severe"
+    CRITICAL = "critical"
+
+class CaseOutcome(str, Enum):
+    FULLY_RESOLVED = "fully_resolved"
+    SIGNIFICANTLY_IMPROVED = "significantly_improved"
+    PARTIALLY_IMPROVED = "partially_improved"
+    UNCHANGED = "unchanged"
+    WORSENED = "worsened"
+    REFERRED = "referred"
+    PATIENT_DISCONTINUED = "patient_discontinued"
+
+class PhotoType(str, Enum):
+    BEFORE = "before"
+    PROGRESS = "progress"
+    AFTER = "after"
+
+class CaseCreate(BaseModel):
+    """Create a new case/episode of care for a patient"""
+    case_title: str = Field(..., min_length=3, max_length=200, description="Brief title for the case (e.g., 'Skin Rash - Right Arm')")
+    case_type: CaseType = Field(default=CaseType.ACUTE, description="Type of case")
+    chief_complaint: str = Field(..., min_length=3, description="Primary complaint for this case")
+    initial_diagnosis: Optional[str] = Field(default=None, description="Initial diagnosis if known")
+    body_parts_affected: Optional[List[str]] = Field(default_factory=list, description="List of body parts affected")
+    severity: CaseSeverity = Field(default=CaseSeverity.MODERATE, description="Severity level")
+    priority: int = Field(default=2, ge=1, le=5, description="Priority 1-5 (1=highest)")
+    expected_resolution_date: Optional[str] = Field(default=None, description="Expected resolution date (YYYY-MM-DD)")
+    next_follow_up_date: Optional[str] = Field(default=None, description="Next follow-up date (YYYY-MM-DD)")
+    tags: Optional[List[str]] = Field(default_factory=list, description="Tags for categorization")
+    notes: Optional[str] = Field(default=None, description="Additional notes")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "case_title": "Skin Rash - Right Arm",
+                "case_type": "acute",
+                "chief_complaint": "Red itchy rash appeared 3 days ago",
+                "initial_diagnosis": "Contact Dermatitis",
+                "body_parts_affected": ["right_arm"],
+                "severity": "moderate",
+                "priority": 2,
+                "tags": ["dermatology", "allergic"]
+            }
+        }
+
+class CaseUpdate(BaseModel):
+    """Update an existing case"""
+    case_title: Optional[str] = Field(default=None, min_length=3, max_length=200)
+    case_type: Optional[CaseType] = None
+    chief_complaint: Optional[str] = None
+    initial_diagnosis: Optional[str] = None
+    final_diagnosis: Optional[str] = None
+    icd10_codes: Optional[List[str]] = None
+    body_parts_affected: Optional[List[str]] = None
+    status: Optional[CaseStatus] = None
+    severity: Optional[CaseSeverity] = None
+    priority: Optional[int] = Field(default=None, ge=1, le=5)
+    expected_resolution_date: Optional[str] = None
+    next_follow_up_date: Optional[str] = None
+    tags: Optional[List[str]] = None
+    notes: Optional[str] = None
+
+class CaseResolve(BaseModel):
+    """Resolve/close a case with outcome information"""
+    final_diagnosis: Optional[str] = Field(default=None, description="Final diagnosis")
+    outcome: CaseOutcome = Field(..., description="Case outcome")
+    outcome_notes: Optional[str] = Field(default=None, description="Notes about the outcome")
+    patient_satisfaction: Optional[int] = Field(default=None, ge=1, le=5, description="Patient satisfaction rating 1-5")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "final_diagnosis": "Contact Dermatitis - Resolved",
+                "outcome": "fully_resolved",
+                "outcome_notes": "Complete resolution after 2 weeks of topical steroids",
+                "patient_satisfaction": 5
+            }
+        }
+
+class CaseResponse(BaseModel):
+    """Full case response model"""
+    id: int
+    patient_id: int
+    doctor_firebase_uid: str
+    case_number: str
+    case_title: str
+    case_type: str
+    chief_complaint: str
+    initial_diagnosis: Optional[str] = None
+    final_diagnosis: Optional[str] = None
+    icd10_codes: List[str] = Field(default_factory=list)
+    body_parts_affected: List[str] = Field(default_factory=list)
+    status: str
+    severity: str
+    priority: int
+    started_at: str
+    resolved_at: Optional[str] = None
+    expected_resolution_date: Optional[str] = None
+    last_visit_date: Optional[str] = None
+    next_follow_up_date: Optional[str] = None
+    outcome: Optional[str] = None
+    outcome_notes: Optional[str] = None
+    patient_satisfaction: Optional[int] = None
+    total_visits: int = 0
+    total_reports: int = 0
+    total_photos: int = 0
+    medications_prescribed: List[dict] = Field(default_factory=list)
+    treatments_given: List[dict] = Field(default_factory=list)
+    ai_summary: Optional[str] = None
+    ai_treatment_effectiveness: Optional[float] = None
+    tags: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+class CaseSummary(BaseModel):
+    """Lightweight case summary for lists"""
+    id: int
+    patient_id: int
+    case_number: str
+    case_title: str
+    case_type: str
+    status: str
+    severity: str
+    started_at: str
+    resolved_at: Optional[str] = None
+    last_visit_date: Optional[str] = None
+    total_visits: int = 0
+    total_photos: int = 0
+    has_before_photo: bool = False
+    has_after_photo: bool = False
+
+class CasePhotoUpload(BaseModel):
+    """Metadata for uploading a case photo"""
+    photo_type: PhotoType = Field(..., description="Type of photo: before, progress, or after")
+    body_part: Optional[str] = Field(default=None, description="Body part shown in photo")
+    body_part_detail: Optional[str] = Field(default=None, description="Detailed description of body part/view")
+    description: Optional[str] = Field(default=None, description="Photo description")
+    clinical_notes: Optional[str] = Field(default=None, description="Clinical notes about this photo")
+    photo_taken_at: Optional[str] = Field(default=None, description="When the photo was taken (ISO datetime)")
+    is_primary: bool = Field(default=False, description="Set as primary photo for this type")
+    visit_id: Optional[int] = Field(default=None, description="Associate with a specific visit")
+
+class CasePhotoResponse(BaseModel):
+    """Case photo response model"""
+    id: int
+    case_id: int
+    visit_id: Optional[int] = None
+    doctor_firebase_uid: str
+    photo_type: str
+    sequence_number: int
+    file_name: str
+    file_url: str
+    file_size: Optional[int] = None
+    file_type: Optional[str] = None
+    storage_path: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+    body_part: Optional[str] = None
+    body_part_detail: Optional[str] = None
+    description: Optional[str] = None
+    clinical_notes: Optional[str] = None
+    photo_taken_at: Optional[str] = None
+    uploaded_at: str
+    is_primary: bool = False
+    comparison_pair_id: Optional[int] = None
+    ai_detected_changes: Optional[str] = None
+    ai_improvement_score: Optional[float] = None
+    created_at: str
+
+class BeforeAfterComparison(BaseModel):
+    """Before/after photo comparison for a case"""
+    case_id: int
+    case_title: str
+    case_status: str
+    body_part: Optional[str] = None
+    before_photo: Optional[CasePhotoResponse] = None
+    after_photo: Optional[CasePhotoResponse] = None
+    progress_photos: List[CasePhotoResponse] = Field(default_factory=list)
+    all_before_photos: List[CasePhotoResponse] = Field(default_factory=list)
+    all_after_photos: List[CasePhotoResponse] = Field(default_factory=list)
+    ai_comparison_analysis: Optional[str] = None
+    visual_improvement_score: Optional[float] = None
+    days_between: Optional[int] = None
+
+class CaseAnalysisRequest(BaseModel):
+    """Request for AI case analysis"""
+    analysis_type: str = Field(default="comprehensive", description="Type: comprehensive, progress_review, outcome_assessment, photo_comparison")
+    include_photos: bool = Field(default=True, description="Include photos in analysis")
+    include_reports: bool = Field(default=True, description="Include reports in analysis")
+    from_date: Optional[str] = Field(default=None, description="Analysis start date (YYYY-MM-DD)")
+    to_date: Optional[str] = Field(default=None, description="Analysis end date (YYYY-MM-DD)")
+
+class CaseAnalysisResponse(BaseModel):
+    """Case AI analysis response"""
+    id: int
+    case_id: int
+    patient_id: int
+    analysis_type: str
+    model_used: str
+    confidence_score: Optional[float] = None
+    visits_analyzed: List[int] = Field(default_factory=list)
+    reports_analyzed: List[int] = Field(default_factory=list)
+    photos_analyzed: List[int] = Field(default_factory=list)
+    case_overview: Optional[str] = None
+    presenting_complaint_summary: Optional[str] = None
+    clinical_findings_summary: Optional[str] = None
+    diagnosis_assessment: Optional[str] = None
+    treatment_timeline: Optional[List[dict]] = None
+    treatment_effectiveness: Optional[str] = None
+    treatment_effectiveness_score: Optional[float] = None
+    medications_analysis: Optional[dict] = None
+    progress_assessment: Optional[str] = None
+    improvement_indicators: Optional[List[dict]] = None
+    photo_comparison_analysis: Optional[str] = None
+    visual_improvement_score: Optional[float] = None
+    current_status_assessment: Optional[str] = None
+    recommended_next_steps: Optional[List[dict]] = None
+    follow_up_recommendations: Optional[str] = None
+    red_flags: List[dict] = Field(default_factory=list)
+    patient_friendly_summary: Optional[str] = None
+    analysis_success: bool = True
+    analysis_error: Optional[str] = None
+    analyzed_at: str
+    created_at: str
+
+class CaseWithDetails(CaseResponse):
+    """Extended case response with visits, photos, reports, and analysis"""
+    visits: List['Visit'] = Field(default_factory=list)
+    photos: List[CasePhotoResponse] = Field(default_factory=list)
+    reports: List['Report'] = Field(default_factory=list)
+    latest_analysis: Optional[CaseAnalysisResponse] = None
+    # Patient info for convenience
+    patient_name: Optional[str] = None
+    patient_phone: Optional[str] = None
+
+class CaseTimeline(BaseModel):
+    """Timeline of case events"""
+    case_id: int
+    case_title: str
+    events: List[dict] = Field(default_factory=list, description="Chronological list of events")
+    total_days: Optional[int] = None
+    status: str
+
+class AssignVisitToCase(BaseModel):
+    """Assign a visit to a case"""
+    case_id: int = Field(..., description="Case ID to assign the visit to")
+    is_case_opener: bool = Field(default=False, description="Mark as the opening visit for this case")
 
 # Additional models used in routes below
 class PatientWithVisits(BaseModel):
     patient: 'PatientProfile'
     visits: list['Visit']
+    active_cases: Optional[list['CaseSummary']] = None  # Active cases for this patient
 
 class ReportLinkCreate(BaseModel):
     expires_in_hours: int = 24
@@ -4928,12 +5201,36 @@ async def get_patient_complete_profile(patient_id: int, current_doctor = Depends
             detail="Patient not found"
         )
     
-    # Get patient visits
-    visits = await db.get_visits_by_patient_id(patient_id, current_doctor["firebase_uid"])
+    # Get patient visits and active cases in parallel
+    visits_task = db.get_visits_by_patient_id(patient_id, current_doctor["firebase_uid"])
+    cases_task = db.get_cases_by_patient(patient_id, current_doctor["firebase_uid"], status="active")
+    
+    visits, active_cases = await asyncio.gather(visits_task, cases_task)
+    
+    # Convert cases to summary format
+    case_summaries = []
+    for case in active_cases:
+        case_summaries.append(CaseSummary(
+            id=case["id"],
+            patient_id=case["patient_id"],
+            case_number=case.get("case_number", ""),
+            case_title=case.get("case_title", ""),
+            case_type=case.get("case_type", "acute"),
+            status=case.get("status", "active"),
+            severity=case.get("severity", "moderate"),
+            started_at=case.get("started_at", ""),
+            resolved_at=case.get("resolved_at"),
+            last_visit_date=case.get("last_visit_date"),
+            total_visits=case.get("total_visits", 0),
+            total_photos=case.get("total_photos", 0),
+            has_before_photo=False,
+            has_after_photo=False
+        ))
     
     return PatientWithVisits(
         patient=PatientProfile(**patient),
-        visits=[Visit(**visit) for visit in visits]
+        visits=[Visit(**visit) for visit in visits],
+        active_cases=case_summaries if case_summaries else None
     )
 
 # Visit Routes
@@ -4987,23 +5284,23 @@ async def create_visit(
                     detail="Selected PDF template is not active"
                 )
         
-        # Validate parent_visit_id if provided (for linked/follow-up visits)
-        parent_visit_context = None
-        if visit.parent_visit_id:
-            parent_visit = await db.get_visit_by_id(visit.parent_visit_id, current_doctor["firebase_uid"])
-            if not parent_visit:
+        # Validate case_id if provided (case-based architecture)
+        case_context = None
+        if visit.case_id:
+            case = await db.get_case_by_id(visit.case_id, current_doctor["firebase_uid"])
+            if not case:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="Parent visit not found or does not belong to this doctor"
+                    detail="Case not found or does not belong to this doctor"
                 )
-            # Verify the parent visit belongs to the same patient
-            if parent_visit["patient_id"] != patient_id:
+            # Verify the case belongs to the same patient
+            if case["patient_id"] != patient_id:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Parent visit must belong to the same patient"
+                    detail="Case must belong to the same patient"
                 )
-            parent_visit_context = parent_visit
-            print(f"Creating linked visit: New visit linked to parent visit {visit.parent_visit_id}")
+            case_context = case
+            print(f"Creating visit for case: {visit.case_id}")
         
         # Prepare visit data for Supabase
         visit_data = {
@@ -5017,10 +5314,10 @@ async def create_visit(
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
         
-        # Add parent visit link if provided
-        if visit.parent_visit_id:
-            visit_data["parent_visit_id"] = visit.parent_visit_id
-            visit_data["link_reason"] = visit.link_reason or "Follow-up visit"
+        # Add case reference if provided
+        if visit.case_id:
+            visit_data["case_id"] = visit.case_id
+            visit_data["is_case_opener"] = visit.is_case_opener
         
         # Add optional fields
         optional_fields = ["visit_time", "symptoms", "clinical_examination", "diagnosis", 
@@ -5179,14 +5476,13 @@ async def create_visit(
                 "lab_requests": lab_requests_created
             }
             
-            # Add linked visit info to response
-            if visit.parent_visit_id and parent_visit_context:
-                response_data["linked_visit"] = {
-                    "parent_visit_id": visit.parent_visit_id,
-                    "link_reason": visit.link_reason or "Follow-up visit",
-                    "parent_visit_date": parent_visit_context.get("visit_date"),
-                    "parent_diagnosis": parent_visit_context.get("diagnosis"),
-                    "parent_chief_complaint": parent_visit_context.get("chief_complaint")
+            # Add case info to response if visit is part of a case
+            if visit.case_id and case_context:
+                response_data["case_info"] = {
+                    "case_id": visit.case_id,
+                    "case_title": case_context.get("case_title"),
+                    "case_status": case_context.get("status"),
+                    "is_case_opener": visit.is_case_opener
                 }
 
             try:
@@ -5314,9 +5610,9 @@ async def get_visit_details(visit_id: int, current_doctor = Depends(get_current_
             "payment_date": visit.get("payment_date"),
             "discount": visit.get("discount"),
             "notes_billing": visit.get("notes_billing"),
-            # Linked visits
-            "parent_visit_id": visit.get("parent_visit_id"),
-            "link_reason": visit.get("link_reason"),
+            # Case-based architecture (replaces deprecated parent_visit_id)
+            "case_id": visit.get("case_id"),
+            "is_case_opener": visit.get("is_case_opener", False),
             # Prescription status
             "prescription_status": visit.get("prescription_status"),
             "prescription_resolution_type": visit.get("prescription_resolution_type"),
@@ -5338,224 +5634,57 @@ async def get_visit_details(visit_id: int, current_doctor = Depends(get_current_
             detail=f"Failed to get visit details: {str(e)}"
         )
 
-@app.get("/visits/{visit_id}/linked-visits", response_model=dict)
+@app.get("/visits/{visit_id}/linked-visits", response_model=dict, deprecated=True)
 async def get_linked_visits(visit_id: int, current_doctor = Depends(get_current_doctor)):
     """
-    Get all visits linked to a specific visit (parent and children).
-    This provides the complete context chain for a visit.
+    DEPRECATED: This endpoint no longer works. Use case-based endpoints instead.
+    
+    - To get visits for a case: GET /cases/{case_id}/visits
+    - To get case details with visits: GET /cases/{case_id}/details
     """
-    try:
-        # Run initial queries in parallel
-        visit_task = db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
-        child_visits_task = db.get_child_visits(visit_id, current_doctor["firebase_uid"])
-        current_reports_task = db.get_reports_by_visit_id(visit_id, current_doctor["firebase_uid"])
-        
-        visit, child_visits, current_reports = await asyncio.gather(
-            visit_task, child_visits_task, current_reports_task
-        )
-        
-        if not visit:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Visit not found"
-            )
-        
-        # Get parent visit and its reports in parallel if parent exists
-        parent_visit = None
-        parent_reports = []
-        if visit.get("parent_visit_id"):
-            parent_visit, parent_reports = await asyncio.gather(
-                db.get_visit_by_id(visit["parent_visit_id"], current_doctor["firebase_uid"]),
-                db.get_reports_by_visit_id(visit["parent_visit_id"], current_doctor["firebase_uid"])
-            )
-        
-        # Build the response
-        response = {
-            "current_visit": {
-                "id": visit["id"],
-                "visit_date": visit["visit_date"],
-                "visit_type": visit["visit_type"],
-                "chief_complaint": visit["chief_complaint"],
-                "diagnosis": visit.get("diagnosis"),
-                "treatment_plan": visit.get("treatment_plan"),
-                "medications": visit.get("medications"),
-                "link_reason": visit.get("link_reason"),
-                "reports_count": len(current_reports) if current_reports else 0
-            },
-            "parent_visit": None,
-            "child_visits": [],
-            "visit_chain_summary": {
-                "has_parent": parent_visit is not None,
-                "child_count": len(child_visits) if child_visits else 0,
-                "total_reports_in_chain": (len(current_reports) if current_reports else 0) + (len(parent_reports) if parent_reports else 0)
-            }
+    # Check if visit has a case_id and redirect
+    visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+    if not visit:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visit not found")
+    
+    if visit.get("case_id"):
+        return {
+            "message": "This endpoint is deprecated. Visit is part of a case.",
+            "case_id": visit["case_id"],
+            "redirect_to": f"/cases/{visit['case_id']}/visits",
+            "deprecated": True
         }
-        
-        if parent_visit:
-            response["parent_visit"] = {
-                "id": parent_visit["id"],
-                "visit_date": parent_visit["visit_date"],
-                "visit_type": parent_visit["visit_type"],
-                "chief_complaint": parent_visit["chief_complaint"],
-                "diagnosis": parent_visit.get("diagnosis"),
-                "treatment_plan": parent_visit.get("treatment_plan"),
-                "medications": parent_visit.get("medications"),
-                "tests_recommended": parent_visit.get("tests_recommended"),
-                "reports_count": len(parent_reports) if parent_reports else 0,
-                "reports": [{
-                    "id": r["id"],
-                    "file_name": r["file_name"],
-                    "test_type": r.get("test_type"),
-                    "uploaded_at": r["uploaded_at"]
-                } for r in (parent_reports or [])[:5]]  # Limit to 5 most recent
-            }
-        
-        if child_visits:
-            response["child_visits"] = [{
-                "id": cv["id"],
-                "visit_date": cv["visit_date"],
-                "visit_type": cv["visit_type"],
-                "chief_complaint": cv["chief_complaint"],
-                "diagnosis": cv.get("diagnosis"),
-                "link_reason": cv.get("link_reason"),
-                "created_at": cv.get("created_at")
-            } for cv in child_visits]
-        
-        return response
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error getting linked visits: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get linked visits: {str(e)}"
-        )
+    
+    return {
+        "message": "This endpoint is deprecated. Use case-based endpoints instead.",
+        "current_visit": {"id": visit["id"], "visit_date": visit["visit_date"]},
+        "parent_visit": None,
+        "child_visits": [],
+        "deprecated": True
+    }
 
-class LinkVisitRequest(BaseModel):
-    parent_visit_id: int
-    link_reason: Optional[str] = None
-
-@app.post("/visits/{visit_id}/link-to-visit", response_model=dict)
+@app.post("/visits/{visit_id}/link-to-visit", response_model=dict, deprecated=True)
 async def link_visit_to_parent(
     visit_id: int,
-    link_request: LinkVisitRequest,
     current_doctor = Depends(get_current_doctor)
 ):
     """
-    Link an existing visit to a parent visit.
-    This allows retroactively linking visits as follow-ups.
+    DEPRECATED: This endpoint no longer works. Use /visits/{visit_id}/assign-to-case instead.
     """
-    try:
-        # Check if visit exists and belongs to current doctor
-        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
-        if not visit:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Visit not found"
-            )
-        
-        # Check if parent visit exists
-        parent_visit = await db.get_visit_by_id(link_request.parent_visit_id, current_doctor["firebase_uid"])
-        if not parent_visit:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Parent visit not found"
-            )
-        
-        # Verify visits belong to the same patient
-        if visit["patient_id"] != parent_visit["patient_id"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot link visits for different patients"
-            )
-        
-        # Prevent circular linking - check if parent_visit already links back to this visit
-        chain_check = parent_visit
-        depth = 0
-        while chain_check.get("parent_visit_id") and depth < 10:
-            if chain_check["parent_visit_id"] == visit_id:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Cannot create circular visit link"
-                )
-            chain_check = await db.get_visit_by_id(chain_check["parent_visit_id"], current_doctor["firebase_uid"])
-            if not chain_check:
-                break
-            depth += 1
-        
-        # Link the visit
-        success = await db.link_visit_to_parent(
-            visit_id=visit_id,
-            parent_visit_id=link_request.parent_visit_id,
-            doctor_firebase_uid=current_doctor["firebase_uid"],
-            link_reason=link_request.link_reason
-        )
-        
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to link visit"
-            )
-        
-        return {
-            "message": "Visit linked successfully",
-            "visit_id": visit_id,
-            "parent_visit_id": link_request.parent_visit_id,
-            "link_reason": link_request.link_reason
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error linking visit: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to link visit: {str(e)}"
-        )
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="This endpoint is deprecated. Use POST /visits/{visit_id}/assign-to-case instead to assign visits to cases."
+    )
 
-@app.delete("/visits/{visit_id}/unlink", response_model=dict)
+@app.delete("/visits/{visit_id}/unlink", response_model=dict, deprecated=True)
 async def unlink_visit(visit_id: int, current_doctor = Depends(get_current_doctor)):
     """
-    Remove the link between a visit and its parent.
+    DEPRECATED: This endpoint no longer works. Use /visits/{visit_id}/remove-from-case instead.
     """
-    try:
-        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
-        if not visit:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Visit not found"
-            )
-        
-        if not visit.get("parent_visit_id"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Visit is not linked to any parent"
-            )
-        
-        # Update visit to remove parent link
-        success = await db.update_visit(
-            visit_id, 
-            current_doctor["firebase_uid"], 
-            {"parent_visit_id": None, "link_reason": None}
-        )
-        
-        if not success:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to unlink visit"
-            )
-        
-        return {"message": "Visit unlinked successfully", "visit_id": visit_id}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error unlinking visit: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to unlink visit: {str(e)}"
-        )
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="This endpoint is deprecated. Use POST /visits/{visit_id}/remove-from-case instead."
+    )
 
 @app.get("/visits/{visit_id}/context-for-analysis", response_model=dict)
 async def get_visit_context_for_analysis(visit_id: int, current_doctor = Depends(get_current_doctor)):
@@ -5580,50 +5709,42 @@ async def get_visit_context_for_analysis(visit_id: int, current_doctor = Depends
                 detail="Patient not found"
             )
         
-        # Build the visit chain (parent visits)
+        # Build the visit chain (previous visits from the same case)
         visit_chain = []
-        current_visit = visit
-        chain_depth = 0
-        max_depth = 5  # Limit chain depth to prevent infinite loops
-        
-        while current_visit.get("parent_visit_id") and chain_depth < max_depth:
-            parent = await db.get_visit_by_id(current_visit["parent_visit_id"], current_doctor["firebase_uid"])
-            if parent:
-                # Get reports for this parent visit
-                parent_reports = await db.get_reports_by_visit_id(parent["id"], current_doctor["firebase_uid"])
-                # Get AI analyses for parent reports
-                parent_analyses = await db.get_ai_analyses_by_visit_id(parent["id"], current_doctor["firebase_uid"])
-                
-                visit_chain.append({
-                    "visit_id": parent["id"],
-                    "visit_date": parent["visit_date"],
-                    "visit_type": parent["visit_type"],
-                    "chief_complaint": parent["chief_complaint"],
-                    "symptoms": parent.get("symptoms"),
-                    "diagnosis": parent.get("diagnosis"),
-                    "treatment_plan": parent.get("treatment_plan"),
-                    "medications": parent.get("medications"),
-                    "tests_recommended": parent.get("tests_recommended"),
-                    "clinical_examination": parent.get("clinical_examination"),
-                    "reports": [{
-                        "id": r["id"],
-                        "file_name": r["file_name"],
-                        "test_type": r.get("test_type"),
-                        "uploaded_at": r["uploaded_at"]
-                    } for r in parent_reports],
-                    "ai_analyses_summary": [{
-                        "report_id": a.get("report_id"),
-                        "document_summary": a.get("document_summary", "")[:200],
-                        "key_findings": a.get("key_findings", [])
-                    } for a in parent_analyses[:3]]  # Limit to 3 most recent
-                })
-                current_visit = parent
-                chain_depth += 1
-            else:
-                break
-        
-        # Reverse to get chronological order (oldest first)
-        visit_chain.reverse()
+        if visit.get("case_id"):
+            # Get all visits in this case
+            case_visits = await db.get_visits_by_case(visit["case_id"], current_doctor["firebase_uid"])
+            # Filter to visits before current one
+            for v in case_visits:
+                if v["id"] != visit["id"] and v.get("visit_date") and v["visit_date"] < visit.get("visit_date", ""):
+                    # Get reports for this visit
+                    v_reports = await db.get_reports_by_visit_id(v["id"], current_doctor["firebase_uid"])
+                    # Get AI analyses
+                    v_analyses = await db.get_ai_analyses_by_visit_id(v["id"], current_doctor["firebase_uid"])
+                    
+                    visit_chain.append({
+                        "visit_id": v["id"],
+                        "visit_date": v["visit_date"],
+                        "visit_type": v["visit_type"],
+                        "chief_complaint": v["chief_complaint"],
+                        "symptoms": v.get("symptoms"),
+                        "diagnosis": v.get("diagnosis"),
+                        "treatment_plan": v.get("treatment_plan"),
+                        "medications": v.get("medications"),
+                        "tests_recommended": v.get("tests_recommended"),
+                        "clinical_examination": v.get("clinical_examination"),
+                        "reports": [{
+                            "id": r["id"],
+                            "file_name": r["file_name"],
+                            "test_type": r.get("test_type"),
+                            "uploaded_at": r["uploaded_at"]
+                        } for r in v_reports],
+                        "ai_analyses_summary": [{
+                            "report_id": a.get("report_id"),
+                            "document_summary": a.get("document_summary", "")[:200],
+                            "key_findings": a.get("key_findings", [])
+                        } for a in (v_analyses or [])[:3]]  # Limit to 3 most recent
+                    })
         
         return {
             "current_visit": {
@@ -5638,7 +5759,7 @@ async def get_visit_context_for_analysis(visit_id: int, current_doctor = Depends
                 "tests_recommended": visit.get("tests_recommended"),
                 "clinical_examination": visit.get("clinical_examination"),
                 "vitals": visit.get("vitals"),
-                "link_reason": visit.get("link_reason")
+                "case_id": visit.get("case_id")
             },
             "patient": {
                 "id": patient["id"],
@@ -5651,7 +5772,7 @@ async def get_visit_context_for_analysis(visit_id: int, current_doctor = Depends
             },
             "visit_history_chain": visit_chain,
             "context_summary": {
-                "is_follow_up": visit.get("parent_visit_id") is not None,
+                "is_part_of_case": visit.get("case_id") is not None,
                 "chain_length": len(visit_chain),
                 "total_previous_visits": len(visit_chain),
                 "has_previous_reports": any(len(v.get("reports", [])) > 0 for v in visit_chain),
@@ -6745,12 +6866,12 @@ async def analyze_handwritten_note(
                 detail="Visit not found"
             )
         
-        # Get linked visit chain context for continuity of care
+        # Get case visit chain context for continuity of care
         visit_chain_context = []
-        if visit.get("parent_visit_id"):
-            print(f"📎 This is a linked visit - fetching visit chain context for handwritten analysis")
+        if visit.get("case_id"):
+            print(f"📎 This visit is part of a case - fetching visit chain context for handwritten analysis")
             try:
-                visit_chain_context = await db.get_visit_chain(note["visit_id"], current_doctor["firebase_uid"])
+                visit_chain_context = await db.get_visits_by_case(visit["case_id"], current_doctor["firebase_uid"])
                 # Remove current visit from chain
                 visit_chain_context = [v for v in visit_chain_context if v["id"] != note["visit_id"]]
                 
@@ -6760,7 +6881,7 @@ async def analyze_handwritten_note(
                     if chain_notes:
                         chain_visit["handwritten_summary"] = chain_notes[0].get("ai_analysis_raw", "")[:300] if chain_notes[0].get("ai_analysis_raw") else ""
                 
-                print(f"✅ Found {len(visit_chain_context)} linked previous visits for handwritten context")
+                print(f"✅ Found {len(visit_chain_context)} case visits for handwritten context")
             except Exception as chain_error:
                 print(f"⚠️ Could not fetch visit chain context: {chain_error}")
                 visit_chain_context = []
@@ -10777,12 +10898,12 @@ async def analyze_report_with_ai(
                 detail="Visit or patient information not found"
             )
         
-        # Get linked visit chain context for continuity of care
+        # Get case visit chain context for continuity of care
         visit_chain_context = []
-        if visit.get("parent_visit_id"):
-            print(f"📎 This is a linked visit - fetching visit chain context for AI analysis")
+        if visit.get("case_id"):
+            print(f"📎 This visit is part of a case - fetching visit chain context for AI analysis")
             try:
-                visit_chain_context = await db.get_visit_chain(report["visit_id"], current_doctor["firebase_uid"])
+                visit_chain_context = await db.get_visits_by_case(visit["case_id"], current_doctor["firebase_uid"])
                 # Remove current visit from chain (we only want previous visits)
                 visit_chain_context = [v for v in visit_chain_context if v["id"] != report["visit_id"]]
                 
@@ -10796,7 +10917,7 @@ async def analyze_report_with_ai(
                     chain_analyses = await db.get_ai_analyses_by_visit_id(chain_visit_id, current_doctor["firebase_uid"])
                     chain_visit["ai_analyses_summary"] = [{"document_summary": a.get("document_summary", "")[:150]} for a in (chain_analyses or [])[:3]]
                 
-                print(f"✅ Found {len(visit_chain_context)} linked previous visits for context")
+                print(f"✅ Found {len(visit_chain_context)} case visits for context")
             except Exception as chain_error:
                 print(f"⚠️ Could not fetch visit chain context: {chain_error}")
                 visit_chain_context = []
@@ -12341,10 +12462,10 @@ async def analyze_report_with_trends(
                 detail="Failed to download report file"
             )
         
-        # Get visit chain if applicable
+        # Get case visit chain if applicable
         visit_chain = None
-        if visit.get("parent_visit_id"):
-            visit_chain = await db.get_visit_chain(visit["id"], doctor_uid)
+        if visit.get("case_id"):
+            visit_chain = await db.get_visits_by_case(visit["case_id"], doctor_uid)
         
         # Perform analysis with trends
         result = await ai_analysis_service.analyze_with_historical_trends(
@@ -13801,6 +13922,973 @@ async def lab_upload_reports(
             detail="Failed to upload lab reports"
         )
 
+# ============================================================
+# CASE/EPISODE OF CARE ENDPOINTS
+# ============================================================
+
+@app.post("/patients/{patient_id}/cases", response_model=CaseResponse, tags=["Cases"])
+async def create_patient_case(
+    patient_id: int,
+    case_data: CaseCreate,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Create a new case/episode of care for a patient.
+    A case groups related visits for a specific medical problem.
+    """
+    try:
+        # Verify patient belongs to doctor
+        patient = await db.get_patient_by_id(patient_id, current_doctor["firebase_uid"])
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        case = await db.create_case(
+            patient_id=patient_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"],
+            case_data=case_data.model_dump()
+        )
+        
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create case"
+            )
+        
+        return case
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error creating case: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create case: {str(e)}"
+        )
+
+@app.get("/patients/{patient_id}/cases", response_model=List[CaseSummary], tags=["Cases"])
+async def get_patient_cases(
+    patient_id: int,
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by status: active, resolved, ongoing, etc."),
+    include_resolved: bool = Query(True, description="Include resolved/closed cases"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Get all cases for a patient.
+    """
+    try:
+        # Verify patient belongs to doctor
+        patient = await db.get_patient_by_id(patient_id, current_doctor["firebase_uid"])
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        cases = await db.get_cases_by_patient(
+            patient_id=patient_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"],
+            status=status_filter,
+            include_resolved=include_resolved,
+            limit=limit,
+            offset=offset
+        )
+        
+        # Add helper fields for before/after photo status
+        result = []
+        for case in cases:
+            photos = await db.get_case_photos(case["id"], current_doctor["firebase_uid"])
+            has_before = any(p["photo_type"] == "before" for p in photos)
+            has_after = any(p["photo_type"] == "after" for p in photos)
+            
+            result.append({
+                **case,
+                "has_before_photo": has_before,
+                "has_after_photo": has_after
+            })
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting patient cases: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get cases: {str(e)}"
+        )
+
+@app.get("/cases/active", response_model=List[dict], tags=["Cases"])
+async def get_active_cases(
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Get all active cases for the current doctor across all patients.
+    """
+    try:
+        cases = await db.get_active_cases_by_doctor(
+            doctor_firebase_uid=current_doctor["firebase_uid"],
+            limit=limit,
+            offset=offset
+        )
+        return cases
+    except Exception as e:
+        print(f"Error getting active cases: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get active cases: {str(e)}"
+        )
+
+@app.get("/cases/{case_id}", response_model=CaseResponse, tags=["Cases"])
+async def get_case(
+    case_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Get a case by ID.
+    """
+    try:
+        case = await db.get_case_by_id(case_id, current_doctor["firebase_uid"])
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found"
+            )
+        return case
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting case: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get case: {str(e)}"
+        )
+
+@app.get("/cases/{case_id}/details", response_model=CaseWithDetails, tags=["Cases"])
+async def get_case_with_details(
+    case_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Get a case with all related data including visits, photos, reports, and latest analysis.
+    """
+    try:
+        case_details = await db.get_case_with_details(case_id, current_doctor["firebase_uid"])
+        if not case_details:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found"
+            )
+        return case_details
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting case details: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get case details: {str(e)}"
+        )
+
+@app.put("/cases/{case_id}", response_model=CaseResponse, tags=["Cases"])
+async def update_case(
+    case_id: int,
+    update_data: CaseUpdate,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Update a case.
+    """
+    try:
+        case = await db.update_case(
+            case_id=case_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"],
+            update_data=update_data.model_dump(exclude_none=True)
+        )
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found or update failed"
+            )
+        return case
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating case: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update case: {str(e)}"
+        )
+
+@app.post("/cases/{case_id}/resolve", response_model=CaseResponse, tags=["Cases"])
+async def resolve_case(
+    case_id: int,
+    resolve_data: CaseResolve,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Resolve/close a case with outcome information.
+    """
+    try:
+        case = await db.resolve_case(
+            case_id=case_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"],
+            outcome=resolve_data.outcome.value,
+            final_diagnosis=resolve_data.final_diagnosis,
+            outcome_notes=resolve_data.outcome_notes,
+            patient_satisfaction=resolve_data.patient_satisfaction
+        )
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found or resolve failed"
+            )
+        return case
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error resolving case: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to resolve case: {str(e)}"
+        )
+
+@app.delete("/cases/{case_id}", response_model=dict, tags=["Cases"])
+async def delete_case(
+    case_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Delete a case. Soft deletes if visits exist, hard deletes if no visits.
+    """
+    try:
+        success = await db.delete_case(case_id, current_doctor["firebase_uid"])
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found"
+            )
+        return {"message": "Case deleted successfully", "case_id": case_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting case: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete case: {str(e)}"
+        )
+
+@app.get("/cases/{case_id}/timeline", response_model=CaseTimeline, tags=["Cases"])
+async def get_case_timeline(
+    case_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Get a chronological timeline of all events for a case.
+    """
+    try:
+        timeline = await db.get_case_timeline(case_id, current_doctor["firebase_uid"])
+        if timeline.get("error") == "Case not found":
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found"
+            )
+        return timeline
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting case timeline: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get case timeline: {str(e)}"
+        )
+
+# ============================================================
+# CASE PHOTOS ENDPOINTS
+# ============================================================
+
+@app.post("/cases/{case_id}/photos", response_model=CasePhotoResponse, tags=["Case Photos"])
+async def upload_case_photo(
+    case_id: int,
+    file: UploadFile = File(...),
+    photo_type: str = Form(..., description="before, progress, or after"),
+    body_part: Optional[str] = Form(None),
+    body_part_detail: Optional[str] = Form(None),
+    description: Optional[str] = Form(None),
+    clinical_notes: Optional[str] = Form(None),
+    photo_taken_at: Optional[str] = Form(None),
+    is_primary: bool = Form(False),
+    visit_id: Optional[int] = Form(None),
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Upload a photo to a case. Supports before, progress, and after photos.
+    """
+    try:
+        # Verify case exists
+        case = await db.get_case_by_id(case_id, current_doctor["firebase_uid"])
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found"
+            )
+        
+        # Validate photo_type
+        if photo_type not in ["before", "progress", "after"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="photo_type must be 'before', 'progress', or 'after'"
+            )
+        
+        # Validate file type
+        allowed_types = ["image/jpeg", "image/png", "image/webp", "image/gif"]
+        if file.content_type not in allowed_types:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"File type {file.content_type} not allowed. Allowed types: {allowed_types}"
+            )
+        
+        # Read file content
+        content = await file.read()
+        file_size = len(content)
+        
+        # Generate unique filename
+        file_ext = file.filename.split('.')[-1] if '.' in file.filename else 'jpg'
+        unique_filename = f"case_{case_id}_{photo_type}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.{file_ext}"
+        
+        # Upload to Firebase Storage
+        storage_path = f"case_photos/{current_doctor['firebase_uid']}/{case['patient_id']}/{case_id}/{unique_filename}"
+        
+        # Get Firebase bucket
+        bucket = firebase_admin.storage.bucket()
+        blob = bucket.blob(storage_path)
+        blob.upload_from_string(content, content_type=file.content_type)
+        blob.make_public()
+        file_url = blob.public_url
+        
+        # Create photo record
+        photo_data = {
+            "photo_type": photo_type,
+            "file_name": file.filename,
+            "file_url": file_url,
+            "file_size": file_size,
+            "file_type": file.content_type,
+            "storage_path": storage_path,
+            "body_part": body_part,
+            "body_part_detail": body_part_detail,
+            "description": description,
+            "clinical_notes": clinical_notes,
+            "photo_taken_at": photo_taken_at,
+            "is_primary": is_primary,
+            "visit_id": visit_id
+        }
+        
+        photo = await db.add_case_photo(
+            case_id=case_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"],
+            photo_data=photo_data
+        )
+        
+        if not photo:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to save photo record"
+            )
+        
+        return photo
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error uploading case photo: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to upload photo: {str(e)}"
+        )
+
+@app.get("/cases/{case_id}/photos", response_model=List[CasePhotoResponse], tags=["Case Photos"])
+async def get_case_photos(
+    case_id: int,
+    photo_type: Optional[str] = Query(None, description="Filter by type: before, progress, after"),
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Get all photos for a case, optionally filtered by type.
+    """
+    try:
+        # Verify case exists
+        case = await db.get_case_by_id(case_id, current_doctor["firebase_uid"])
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found"
+            )
+        
+        photos = await db.get_case_photos(
+            case_id=case_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"],
+            photo_type=photo_type
+        )
+        
+        return photos
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting case photos: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get photos: {str(e)}"
+        )
+
+@app.get("/cases/{case_id}/before-after", response_model=BeforeAfterComparison, tags=["Case Photos"])
+async def get_before_after_comparison(
+    case_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Get before and after photos for comparison.
+    Returns primary before/after photos plus all photos of each type.
+    """
+    try:
+        # Verify case exists
+        case = await db.get_case_by_id(case_id, current_doctor["firebase_uid"])
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found"
+            )
+        
+        comparison = await db.get_before_after_photos(
+            case_id=case_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"]
+        )
+        
+        # Calculate days between if both before and after exist
+        days_between = None
+        if comparison.get("before_photo") and comparison.get("after_photo"):
+            try:
+                before_date = comparison["before_photo"].get("photo_taken_at") or comparison["before_photo"]["uploaded_at"]
+                after_date = comparison["after_photo"].get("photo_taken_at") or comparison["after_photo"]["uploaded_at"]
+                from datetime import datetime as dt
+                before_dt = dt.fromisoformat(before_date.replace("Z", "+00:00"))
+                after_dt = dt.fromisoformat(after_date.replace("Z", "+00:00"))
+                days_between = (after_dt - before_dt).days
+            except:
+                pass
+        
+        return {
+            "case_id": case_id,
+            "case_title": case["case_title"],
+            "case_status": case["status"],
+            "body_part": case.get("body_parts_affected", [None])[0] if case.get("body_parts_affected") else None,
+            **comparison,
+            "days_between": days_between
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting before/after comparison: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get comparison: {str(e)}"
+        )
+
+@app.put("/cases/{case_id}/photos/{photo_id}", response_model=CasePhotoResponse, tags=["Case Photos"])
+async def update_case_photo(
+    case_id: int,
+    photo_id: int,
+    body_part: Optional[str] = None,
+    body_part_detail: Optional[str] = None,
+    description: Optional[str] = None,
+    clinical_notes: Optional[str] = None,
+    photo_taken_at: Optional[str] = None,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Update case photo metadata.
+    """
+    try:
+        update_data = {
+            "body_part": body_part,
+            "body_part_detail": body_part_detail,
+            "description": description,
+            "clinical_notes": clinical_notes,
+            "photo_taken_at": photo_taken_at
+        }
+        
+        photo = await db.update_case_photo(
+            photo_id=photo_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"],
+            update_data=update_data
+        )
+        
+        if not photo:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Photo not found"
+            )
+        
+        return photo
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating case photo: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update photo: {str(e)}"
+        )
+
+@app.post("/cases/{case_id}/photos/{photo_id}/set-primary", response_model=dict, tags=["Case Photos"])
+async def set_primary_photo(
+    case_id: int,
+    photo_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Set a photo as the primary photo for its type within the case.
+    """
+    try:
+        success = await db.set_primary_photo(
+            case_id=case_id,
+            photo_id=photo_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"]
+        )
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Photo not found or doesn't belong to this case"
+            )
+        
+        return {"message": "Primary photo set successfully", "photo_id": photo_id}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error setting primary photo: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to set primary photo: {str(e)}"
+        )
+
+@app.delete("/cases/{case_id}/photos/{photo_id}", response_model=dict, tags=["Case Photos"])
+async def delete_case_photo(
+    case_id: int,
+    photo_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Delete a case photo.
+    """
+    try:
+        # Get photo to get storage path
+        photo = await db.get_case_photo_by_id(photo_id, current_doctor["firebase_uid"])
+        if not photo or photo["case_id"] != case_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Photo not found"
+            )
+        
+        # Delete from storage
+        if photo.get("storage_path"):
+            try:
+                bucket = firebase_admin.storage.bucket()
+                blob = bucket.blob(photo["storage_path"])
+                blob.delete()
+            except Exception as storage_error:
+                print(f"Warning: Could not delete from storage: {storage_error}")
+        
+        # Delete record
+        success = await db.delete_case_photo(photo_id, current_doctor["firebase_uid"])
+        
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to delete photo"
+            )
+        
+        return {"message": "Photo deleted successfully", "photo_id": photo_id}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting case photo: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete photo: {str(e)}"
+        )
+
+# ============================================================
+# VISIT-CASE RELATIONSHIP ENDPOINTS
+# ============================================================
+
+@app.post("/visits/{visit_id}/assign-to-case", response_model=dict, tags=["Cases"])
+async def assign_visit_to_case(
+    visit_id: int,
+    assignment: AssignVisitToCase,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Assign a visit to a case/episode of care.
+    """
+    try:
+        visit = await db.assign_visit_to_case(
+            visit_id=visit_id,
+            case_id=assignment.case_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"],
+            is_case_opener=assignment.is_case_opener
+        )
+        
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit or case not found"
+            )
+        
+        return {
+            "message": "Visit assigned to case successfully",
+            "visit_id": visit_id,
+            "case_id": assignment.case_id,
+            "is_case_opener": assignment.is_case_opener
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error assigning visit to case: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to assign visit to case: {str(e)}"
+        )
+
+@app.post("/visits/{visit_id}/remove-from-case", response_model=dict, tags=["Cases"])
+async def remove_visit_from_case(
+    visit_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Remove a visit from its case.
+    """
+    try:
+        visit = await db.remove_visit_from_case(
+            visit_id=visit_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"]
+        )
+        
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        return {
+            "message": "Visit removed from case successfully",
+            "visit_id": visit_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error removing visit from case: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to remove visit from case: {str(e)}"
+        )
+
+@app.get("/cases/{case_id}/visits", response_model=List[dict], tags=["Cases"])
+async def get_case_visits(
+    case_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Get all visits for a case.
+    """
+    try:
+        case = await db.get_case_by_id(case_id, current_doctor["firebase_uid"])
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found"
+            )
+        
+        visits = await db.get_visits_by_case(case_id, current_doctor["firebase_uid"])
+        return visits
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting case visits: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get case visits: {str(e)}"
+        )
+
+# ============================================================
+# CASE ANALYSIS ENDPOINTS
+# ============================================================
+
+@app.get("/cases/{case_id}/analyses", response_model=List[CaseAnalysisResponse], tags=["Case Analysis"])
+async def get_case_analyses(
+    case_id: int,
+    limit: int = Query(10, ge=1, le=50),
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Get all AI analyses for a case.
+    """
+    try:
+        case = await db.get_case_by_id(case_id, current_doctor["firebase_uid"])
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found"
+            )
+        
+        analyses = await db.get_case_analyses(
+            case_id=case_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"],
+            limit=limit
+        )
+        return analyses
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting case analyses: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get analyses: {str(e)}"
+        )
+
+@app.get("/cases/{case_id}/latest-analysis", response_model=Optional[CaseAnalysisResponse], tags=["Case Analysis"])
+async def get_latest_case_analysis(
+    case_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Get the most recent AI analysis for a case.
+    """
+    try:
+        case = await db.get_case_by_id(case_id, current_doctor["firebase_uid"])
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found"
+            )
+        
+        analysis = await db.get_latest_case_analysis(
+            case_id=case_id,
+            doctor_firebase_uid=current_doctor["firebase_uid"]
+        )
+        
+        return analysis  # Can be None if no analysis exists
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error getting latest case analysis: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get latest analysis: {str(e)}"
+        )
+
+@app.post("/cases/{case_id}/analyze", response_model=CaseAnalysisResponse, tags=["Case Analysis"])
+async def analyze_case(
+    case_id: int,
+    request: CaseAnalysisRequest,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Trigger AI analysis for a case. Analyzes all visits, reports, and photos.
+    """
+    try:
+        if not ai_analysis_service:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="AI analysis service is not available"
+            )
+        
+        # Get case with all related data
+        case_details = await db.get_case_with_details(case_id, current_doctor["firebase_uid"])
+        if not case_details:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found"
+            )
+        
+        # Get patient context
+        patient = await db.get_patient_by_id(case_details["patient_id"], current_doctor["firebase_uid"])
+        if not patient:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Patient not found"
+            )
+        
+        # Build patient context
+        patient_context = {
+            "full_name": patient.get("full_name", "Unknown"),
+            "age": patient.get("age", "Unknown"),
+            "gender": patient.get("gender", "Unknown"),
+            "blood_group": patient.get("blood_group", "Unknown"),
+            "allergies": patient.get("allergies", "None known"),
+            "chronic_conditions": patient.get("chronic_conditions", "None known"),
+            "current_medications": patient.get("current_medications", "None")
+        }
+        
+        # Build doctor context
+        doctor_context = {
+            "name": current_doctor.get("full_name", "Doctor"),
+            "specialization": current_doctor.get("specialization", "General")
+        }
+        
+        # Get photos if requested
+        photos = []
+        if request.include_photos:
+            photos = case_details.get("photos", [])
+        
+        # Get reports if requested
+        reports = []
+        if request.include_reports:
+            reports = case_details.get("reports", [])
+        
+        # Run AI analysis
+        analysis_result = await ai_analysis_service.analyze_case(
+            case_data=case_details,
+            visits=case_details.get("visits", []),
+            photos=photos,
+            reports=reports,
+            patient_context=patient_context,
+            doctor_context=doctor_context,
+            analysis_type=request.analysis_type
+        )
+        
+        if not analysis_result.get("success"):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Analysis failed: {analysis_result.get('error', 'Unknown error')}"
+            )
+        
+        # Save analysis to database
+        saved_analysis = await db.create_case_analysis(
+            case_id=case_id,
+            patient_id=case_details["patient_id"],
+            doctor_firebase_uid=current_doctor["firebase_uid"],
+            analysis_data=analysis_result
+        )
+        
+        if not saved_analysis:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to save analysis results"
+            )
+        
+        return saved_analysis
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error analyzing case: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to analyze case: {str(e)}"
+        )
+
+@app.post("/cases/{case_id}/compare-photos", response_model=dict, tags=["Case Analysis"])
+async def compare_case_photos(
+    case_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Compare before and after photos for a case using AI.
+    """
+    try:
+        if not ai_analysis_service:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="AI analysis service is not available"
+            )
+        
+        # Get case
+        case = await db.get_case_by_id(case_id, current_doctor["firebase_uid"])
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found"
+            )
+        
+        # Get before/after photos
+        comparison = await db.get_before_after_photos(case_id, current_doctor["firebase_uid"])
+        
+        if not comparison.get("before_photo") or not comparison.get("after_photo"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Need both before and after photos for comparison"
+            )
+        
+        # Get patient for context
+        patient = await db.get_patient_by_id(case["patient_id"], current_doctor["firebase_uid"])
+        patient_context = {
+            "age": patient.get("age", "Unknown") if patient else "Unknown",
+            "gender": patient.get("gender", "Unknown") if patient else "Unknown"
+        }
+        
+        # Run photo comparison
+        result = await ai_analysis_service.analyze_photos_comparison(
+            before_photo_url=comparison["before_photo"]["file_url"],
+            after_photo_url=comparison["after_photo"]["file_url"],
+            case_context=case,
+            patient_context=patient_context
+        )
+        
+        if not result.get("success"):
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Photo comparison failed: {result.get('error', 'Unknown error')}"
+            )
+        
+        # Update photos with AI analysis
+        if result.get("visual_improvement_score"):
+            await db.update_case_photo(
+                photo_id=comparison["after_photo"]["id"],
+                doctor_firebase_uid=current_doctor["firebase_uid"],
+                update_data={
+                    "ai_improvement_score": result["visual_improvement_score"],
+                    "ai_detected_changes": result.get("analysis", {}).get("comparison_summary", {}).get("overall_change"),
+                    "comparison_pair_id": comparison["before_photo"]["id"]
+                }
+            )
+        
+        return {
+            "case_id": case_id,
+            "before_photo_id": comparison["before_photo"]["id"],
+            "after_photo_id": comparison["after_photo"]["id"],
+            "visual_improvement_score": result.get("visual_improvement_score"),
+            "overall_change": result.get("overall_change"),
+            "analysis": result.get("analysis"),
+            "confidence_score": result.get("confidence_score")
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error comparing case photos: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to compare photos: {str(e)}"
+        )
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app:app", host="127.0.0.1", port=5000, reload=True)
+5

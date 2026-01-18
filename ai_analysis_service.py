@@ -390,7 +390,8 @@ IMPORTANT: Use this history to provide continuity of care analysis.
                 prev_treatment = prev_visit.get('treatment_plan', 'Not recorded')
                 prev_medications = prev_visit.get('medications', 'None')
                 prev_tests = prev_visit.get('tests_recommended', 'None')
-                link_reason = prev_visit.get('link_reason', 'Follow-up')
+                # Use visit_type as context indicator (case-based architecture)
+                visit_context_label = prev_visit.get('visit_type', 'Follow-up')
                 
                 # Include AI analysis summary if available
                 ai_summary = ""
@@ -409,7 +410,7 @@ IMPORTANT: Use this history to provide continuity of care analysis.
                         reports_info = f"\\n    - Reports Uploaded: {', '.join([r.get('file_name', 'Unknown') for r in reports[:3]])}"
                 
                 visit_chain_section += f"""
-  **Previous Visit #{i} ({link_reason}):**
+  **Previous Visit #{i} ({visit_context_label}):**
     - Date: {prev_date}
     - Chief Complaint: {prev_complaint}
     - Diagnosis: {prev_diagnosis}
@@ -1854,7 +1855,8 @@ This patient has been seen before for related concerns. Use this history for con
                 prev_diagnosis = prev_visit.get('diagnosis', 'Not recorded')
                 prev_treatment = prev_visit.get('treatment_plan', 'Not recorded')
                 prev_medications = prev_visit.get('medications', 'None')
-                link_reason = prev_visit.get('link_reason', 'Follow-up')
+                # Use visit_type as context indicator (case-based architecture)
+                visit_context_label = prev_visit.get('visit_type', 'Follow-up')
                 
                 # Include previous handwritten notes summary if available
                 prev_notes = ""
@@ -1862,7 +1864,7 @@ This patient has been seen before for related concerns. Use this history for con
                     prev_notes = f"\\n    - Previous Handwritten Notes Summary: {prev_visit.get('handwritten_summary', '')[:200]}"
                 
                 visit_chain_section += f"""
-  **Previous Visit #{i} ({link_reason}):**
+  **Previous Visit #{i} ({visit_context_label}):**
     - Date: {prev_date}
     - Chief Complaint: {prev_complaint}
     - Diagnosis: {prev_diagnosis}
@@ -2809,6 +2811,418 @@ Include a dedicated "TREND ANALYSIS" section in your response.
             base_prompt = trend_section + base_prompt
         
         return base_prompt
+
+    # ============================================================================
+    # CASE/EPISODE OF CARE ANALYSIS METHODS
+    # ============================================================================
+
+    async def analyze_case(
+        self,
+        case_data: Dict[str, Any],
+        visits: List[Dict[str, Any]],
+        photos: List[Dict[str, Any]],
+        reports: List[Dict[str, Any]],
+        patient_context: Dict[str, Any],
+        doctor_context: Dict[str, Any],
+        analysis_type: str = "comprehensive"
+    ) -> Dict[str, Any]:
+        """
+        Analyze a complete case/episode of care across multiple visits.
+        
+        Args:
+            case_data: Case information (title, type, chief complaint, etc.)
+            visits: List of visits associated with the case
+            photos: List of case photos (before, progress, after)
+            reports: List of reports/documents associated with case visits
+            patient_context: Patient information
+            doctor_context: Doctor information
+            analysis_type: Type of analysis (comprehensive, progress_review, outcome_assessment)
+        
+        Returns:
+            Dict containing case analysis results
+        """
+        try:
+            print(f"Starting case analysis for case: {case_data.get('case_title', 'Unknown')}")
+            
+            # Import the schema
+            from ai_schemas import CASE_ANALYSIS_SCHEMA
+            
+            # Build the case analysis prompt
+            prompt = self._create_case_analysis_prompt(
+                case_data=case_data,
+                visits=visits,
+                photos=photos,
+                reports=reports,
+                patient_context=patient_context,
+                doctor_context=doctor_context,
+                analysis_type=analysis_type
+            )
+            
+            # Prepare photo content if available
+            photo_contents = []
+            for photo in photos:
+                if photo.get("file_url"):
+                    try:
+                        photo_data = await self._fetch_image_from_url(photo["file_url"])
+                        if photo_data:
+                            photo_contents.append({
+                                "type": photo.get("photo_type", "unknown"),
+                                "data": photo_data,
+                                "description": photo.get("description", "")
+                            })
+                    except Exception as e:
+                        print(f"Warning: Could not fetch photo: {e}")
+            
+            # Build content parts
+            content_parts = [types.Part.from_text(text=prompt)]
+            
+            # Add photos to content
+            for photo in photo_contents:
+                content_parts.append(types.Part.from_bytes(
+                    data=photo["data"],
+                    mime_type="image/jpeg"
+                ))
+            
+            # Create generation config with JSON schema
+            generation_config = types.GenerateContentConfig(
+                temperature=0.3,
+                top_p=0.95,
+                max_output_tokens=8192,
+                response_mime_type="application/json",
+                response_schema=CASE_ANALYSIS_SCHEMA
+            )
+            
+            # Generate analysis
+            response = await asyncio.get_event_loop().run_in_executor(
+                self.executor,
+                lambda: self.client.models.generate_content(
+                    model=f"publishers/google/models/{self.model_name}",
+                    contents=[types.Content(role="user", parts=content_parts)],
+                    config=generation_config
+                )
+            )
+            
+            if not response or not response.text:
+                return {
+                    "success": False,
+                    "error": "No response from AI model",
+                    "analysis": None
+                }
+            
+            # Parse JSON response
+            try:
+                analysis_result = json.loads(response.text)
+            except json.JSONDecodeError:
+                return {
+                    "success": False,
+                    "error": "Failed to parse AI response",
+                    "analysis": None
+                }
+            
+            # Extract key scores
+            treatment_effectiveness_score = None
+            if isinstance(analysis_result.get("treatment_effectiveness"), dict):
+                treatment_effectiveness_score = analysis_result["treatment_effectiveness"].get("effectiveness_score")
+            
+            visual_improvement_score = None
+            if isinstance(analysis_result.get("photo_comparison_analysis"), dict):
+                visual_improvement_score = analysis_result["photo_comparison_analysis"].get("visual_improvement_score")
+            
+            return {
+                "success": True,
+                "analysis_type": analysis_type,
+                "model_used": self.model_name,
+                "confidence_score": analysis_result.get("confidence_score"),
+                "visits_analyzed": [v.get("id") for v in visits],
+                "reports_analyzed": [r.get("id") for r in reports],
+                "photos_analyzed": [p.get("id") for p in photos],
+                "case_overview": analysis_result.get("case_overview"),
+                "presenting_complaint_summary": analysis_result.get("presenting_complaint_summary"),
+                "clinical_findings_summary": analysis_result.get("clinical_findings_summary"),
+                "diagnosis_assessment": json.dumps(analysis_result.get("diagnosis_assessment")) if analysis_result.get("diagnosis_assessment") else None,
+                "treatment_timeline": analysis_result.get("treatment_timeline"),
+                "treatment_effectiveness": json.dumps(analysis_result.get("treatment_effectiveness")) if analysis_result.get("treatment_effectiveness") else None,
+                "treatment_effectiveness_score": treatment_effectiveness_score,
+                "medications_analysis": analysis_result.get("medications_analysis"),
+                "progress_assessment": json.dumps(analysis_result.get("progress_assessment")) if analysis_result.get("progress_assessment") else None,
+                "improvement_indicators": analysis_result.get("improvement_indicators"),
+                "photo_comparison_analysis": json.dumps(analysis_result.get("photo_comparison_analysis")) if analysis_result.get("photo_comparison_analysis") else None,
+                "visual_improvement_score": visual_improvement_score,
+                "current_status_assessment": analysis_result.get("current_status_assessment"),
+                "recommended_next_steps": analysis_result.get("recommended_next_steps"),
+                "follow_up_recommendations": json.dumps(analysis_result.get("follow_up_recommendations")) if analysis_result.get("follow_up_recommendations") else None,
+                "red_flags": analysis_result.get("red_flags", []),
+                "patient_friendly_summary": analysis_result.get("patient_friendly_summary"),
+                "analysis_success": True
+            }
+            
+        except Exception as e:
+            print(f"Error in case analysis: {e}")
+            traceback.print_exc()
+            return {
+                "success": False,
+                "error": str(e),
+                "analysis": None,
+                "analysis_success": False,
+                "analysis_error": str(e)
+            }
+
+    async def analyze_photos_comparison(
+        self,
+        before_photo_url: str,
+        after_photo_url: str,
+        case_context: Dict[str, Any],
+        patient_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Analyze before and after photos for visual progress assessment.
+        
+        Args:
+            before_photo_url: URL of the before photo
+            after_photo_url: URL of the after photo
+            case_context: Case information for context
+            patient_context: Patient information
+        
+        Returns:
+            Dict containing photo comparison analysis
+        """
+        try:
+            print("Starting photo comparison analysis")
+            
+            from ai_schemas import PHOTO_COMPARISON_SCHEMA
+            
+            # Fetch both photos
+            before_data = await self._fetch_image_from_url(before_photo_url)
+            after_data = await self._fetch_image_from_url(after_photo_url)
+            
+            if not before_data or not after_data:
+                return {
+                    "success": False,
+                    "error": "Could not fetch one or both photos",
+                    "analysis": None
+                }
+            
+            # Build comparison prompt
+            prompt = self._create_photo_comparison_prompt(case_context, patient_context)
+            
+            # Build content parts
+            content_parts = [
+                types.Part.from_text(text=prompt),
+                types.Part.from_text(text="BEFORE PHOTO:"),
+                types.Part.from_bytes(data=before_data, mime_type="image/jpeg"),
+                types.Part.from_text(text="AFTER PHOTO:"),
+                types.Part.from_bytes(data=after_data, mime_type="image/jpeg")
+            ]
+            
+            # Create generation config
+            generation_config = types.GenerateContentConfig(
+                temperature=0.3,
+                top_p=0.95,
+                max_output_tokens=4096,
+                response_mime_type="application/json",
+                response_schema=PHOTO_COMPARISON_SCHEMA
+            )
+            
+            # Generate analysis
+            response = await asyncio.get_event_loop().run_in_executor(
+                self.executor,
+                lambda: self.client.models.generate_content(
+                    model=f"publishers/google/models/{self.model_name}",
+                    contents=[types.Content(role="user", parts=content_parts)],
+                    config=generation_config
+                )
+            )
+            
+            if not response or not response.text:
+                return {
+                    "success": False,
+                    "error": "No response from AI model",
+                    "analysis": None
+                }
+            
+            try:
+                analysis_result = json.loads(response.text)
+            except json.JSONDecodeError:
+                return {
+                    "success": False,
+                    "error": "Failed to parse AI response",
+                    "analysis": None
+                }
+            
+            return {
+                "success": True,
+                "model_used": self.model_name,
+                "analysis": analysis_result,
+                "visual_improvement_score": analysis_result.get("visual_improvement_score"),
+                "overall_change": analysis_result.get("comparison_summary", {}).get("overall_change"),
+                "confidence_score": analysis_result.get("confidence_score")
+            }
+            
+        except Exception as e:
+            print(f"Error in photo comparison analysis: {e}")
+            traceback.print_exc()
+            return {
+                "success": False,
+                "error": str(e),
+                "analysis": None
+            }
+
+    def _create_case_analysis_prompt(
+        self,
+        case_data: Dict[str, Any],
+        visits: List[Dict[str, Any]],
+        photos: List[Dict[str, Any]],
+        reports: List[Dict[str, Any]],
+        patient_context: Dict[str, Any],
+        doctor_context: Dict[str, Any],
+        analysis_type: str
+    ) -> str:
+        """Create the prompt for case analysis"""
+        
+        # Sort visits by date
+        sorted_visits = sorted(visits, key=lambda x: x.get("visit_date", ""))
+        
+        prompt = f"""
+═══════════════════════════════════════════════════════════════════════════════
+                    CASE/EPISODE OF CARE ANALYSIS
+═══════════════════════════════════════════════════════════════════════════════
+
+You are an experienced medical professional analyzing a complete case/episode of care.
+Analyze the treatment progress and provide comprehensive insights.
+
+═══════════════════════════════════════════════════════════════════════════════
+**CASE INFORMATION:**
+═══════════════════════════════════════════════════════════════════════════════
+Case Title: {case_data.get('case_title', 'Unknown')}
+Case Type: {case_data.get('case_type', 'Unknown')}
+Chief Complaint: {case_data.get('chief_complaint', 'Not specified')}
+Initial Diagnosis: {case_data.get('initial_diagnosis', 'Not specified')}
+Current Status: {case_data.get('status', 'Unknown')}
+Severity: {case_data.get('severity', 'Unknown')}
+Started: {case_data.get('started_at', 'Unknown')}
+Body Parts Affected: {', '.join(case_data.get('body_parts_affected', [])) or 'Not specified'}
+
+═══════════════════════════════════════════════════════════════════════════════
+**PATIENT INFORMATION:**
+═══════════════════════════════════════════════════════════════════════════════
+Name: {patient_context.get('full_name', 'Unknown')}
+Age: {patient_context.get('age', 'Unknown')} years
+Gender: {patient_context.get('gender', 'Unknown')}
+Blood Group: {patient_context.get('blood_group', 'Unknown')}
+Known Allergies: {patient_context.get('allergies', 'None known')}
+Chronic Conditions: {patient_context.get('chronic_conditions', 'None known')}
+Current Medications: {patient_context.get('current_medications', 'None')}
+
+═══════════════════════════════════════════════════════════════════════════════
+**VISIT HISTORY ({len(sorted_visits)} visits):**
+═══════════════════════════════════════════════════════════════════════════════
+"""
+        
+        for i, visit in enumerate(sorted_visits, 1):
+            prompt += f"""
+--- Visit #{i} ({visit.get('visit_date', 'Unknown date')}) ---
+Type: {visit.get('visit_type', 'Unknown')}
+Chief Complaint: {visit.get('chief_complaint', 'Not recorded')}
+Symptoms: {visit.get('symptoms', 'Not recorded')}
+Clinical Examination: {visit.get('clinical_examination', 'Not recorded')}
+Diagnosis: {visit.get('diagnosis', 'Not recorded')}
+Treatment Plan: {visit.get('treatment_plan', 'Not recorded')}
+Medications: {visit.get('medications', 'Not recorded')}
+Notes: {visit.get('notes', 'None')}
+"""
+        
+        # Add photo information if available
+        if photos:
+            before_photos = [p for p in photos if p.get('photo_type') == 'before']
+            progress_photos = [p for p in photos if p.get('photo_type') == 'progress']
+            after_photos = [p for p in photos if p.get('photo_type') == 'after']
+            
+            prompt += f"""
+═══════════════════════════════════════════════════════════════════════════════
+**PHOTO DOCUMENTATION:**
+═══════════════════════════════════════════════════════════════════════════════
+Before Photos: {len(before_photos)}
+Progress Photos: {len(progress_photos)}
+After Photos: {len(after_photos)}
+
+Please analyze any provided photos and compare the visual changes.
+"""
+        
+        # Add analysis instructions based on type
+        prompt += f"""
+═══════════════════════════════════════════════════════════════════════════════
+**ANALYSIS TYPE: {analysis_type.upper()}**
+═══════════════════════════════════════════════════════════════════════════════
+
+Please provide a comprehensive analysis including:
+
+1. **Case Overview**: Summary of the entire case journey
+2. **Treatment Effectiveness**: How effective has the treatment been?
+3. **Progress Assessment**: Overall progress from first to latest visit
+4. **Visual Progress** (if photos provided): Compare before/after photos
+5. **Red Flags**: Any concerns or warning signs
+6. **Recommendations**: Next steps and follow-up recommendations
+7. **Patient-Friendly Summary**: Simple explanation for the patient
+
+Be thorough but concise. Focus on actionable insights.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+        
+        return prompt
+
+    def _create_photo_comparison_prompt(
+        self,
+        case_context: Dict[str, Any],
+        patient_context: Dict[str, Any]
+    ) -> str:
+        """Create prompt for photo comparison analysis"""
+        
+        return f"""
+═══════════════════════════════════════════════════════════════════════════════
+                    MEDICAL PHOTO COMPARISON ANALYSIS
+═══════════════════════════════════════════════════════════════════════════════
+
+You are analyzing before and after medical photos to assess treatment progress.
+
+**CASE CONTEXT:**
+Condition: {case_context.get('case_title', 'Unknown')}
+Chief Complaint: {case_context.get('chief_complaint', 'Unknown')}
+Diagnosis: {case_context.get('initial_diagnosis') or case_context.get('final_diagnosis', 'Unknown')}
+Body Part: {', '.join(case_context.get('body_parts_affected', [])) or 'Unknown'}
+
+**PATIENT:**
+Age: {patient_context.get('age', 'Unknown')} years
+Gender: {patient_context.get('gender', 'Unknown')}
+
+**INSTRUCTIONS:**
+1. Carefully analyze the BEFORE photo first
+2. Then analyze the AFTER photo
+3. Compare the two and identify all visible changes
+4. Assess the degree of improvement or deterioration
+5. Provide a visual improvement score (0-100)
+   - 0 = Significantly worse
+   - 50 = No change
+   - 100 = Complete resolution
+6. Give clinical recommendations based on visual progress
+7. Provide a patient-friendly explanation
+
+Be objective and thorough in your assessment.
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
+    async def _fetch_image_from_url(self, url: str) -> Optional[bytes]:
+        """Fetch image content from URL"""
+        try:
+            response = await asyncio.get_event_loop().run_in_executor(
+                self.executor,
+                lambda: requests.get(url, timeout=30)
+            )
+            if response.status_code == 200:
+                return response.content
+            return None
+        except Exception as e:
+            print(f"Error fetching image from URL: {e}")
+            return None
 
     def __del__(self):
         """Cleanup thread pool executor"""

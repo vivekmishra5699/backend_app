@@ -842,3 +842,404 @@ DIFFERENTIAL_DIAGNOSIS_SCHEMA: Dict[str, Any] = {
     },
     "required": ["primary_diagnosis", "differential_diagnoses", "clinical_reasoning", "confidence_score"]
 }
+
+# ============================================================================
+# CASE/EPISODE OF CARE ANALYSIS SCHEMA
+# Used for analyzing treatment progress across multiple visits
+# ============================================================================
+
+CASE_ANALYSIS_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "case_overview": {
+            "type": "string",
+            "description": "Comprehensive overview of the case including timeline and key events"
+        },
+        "presenting_complaint_summary": {
+            "type": "string",
+            "description": "Summary of the initial presenting complaint"
+        },
+        "clinical_findings_summary": {
+            "type": "string",
+            "description": "Summary of clinical findings across all visits"
+        },
+        "diagnosis_assessment": {
+            "type": "object",
+            "properties": {
+                "initial_diagnosis": {
+                    "type": "string",
+                    "description": "Initial diagnosis given"
+                },
+                "current_diagnosis": {
+                    "type": "string",
+                    "description": "Current/updated diagnosis"
+                },
+                "diagnosis_confidence": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 1,
+                    "description": "Confidence in the diagnosis (0-1)"
+                },
+                "diagnosis_evolution": {
+                    "type": "string",
+                    "description": "How the diagnosis has evolved over time"
+                }
+            }
+        },
+        "treatment_timeline": {
+            "type": "array",
+            "description": "Chronological list of treatments and their outcomes",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "Date of treatment/visit"},
+                    "treatment": {"type": "string", "description": "Treatment given"},
+                    "response": {
+                        "type": "string",
+                        "enum": ["excellent", "good", "partial", "poor", "no_response", "adverse"],
+                        "description": "Patient response to treatment"
+                    },
+                    "notes": {"type": "string"}
+                }
+            }
+        },
+        "treatment_effectiveness": {
+            "type": "object",
+            "properties": {
+                "overall_assessment": {
+                    "type": "string",
+                    "description": "Narrative assessment of treatment effectiveness"
+                },
+                "effectiveness_score": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Treatment effectiveness score (0-100)"
+                },
+                "most_effective_treatment": {
+                    "type": "string",
+                    "description": "Which treatment showed the best results"
+                },
+                "least_effective_treatment": {
+                    "type": "string",
+                    "description": "Which treatment showed poorest results"
+                },
+                "adherence_assessment": {
+                    "type": "string",
+                    "description": "Assessment of patient adherence to treatment"
+                }
+            }
+        },
+        "medications_analysis": {
+            "type": "object",
+            "properties": {
+                "medications_prescribed": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "medication": {"type": "string"},
+                            "dosage": {"type": "string"},
+                            "duration": {"type": "string"},
+                            "effectiveness": {
+                                "type": "string",
+                                "enum": ["highly_effective", "moderately_effective", "minimally_effective", "ineffective", "unknown"]
+                            },
+                            "side_effects_reported": {"type": "string"}
+                        }
+                    }
+                },
+                "medication_changes": {
+                    "type": "string",
+                    "description": "Summary of medication changes during treatment"
+                },
+                "recommendations": {
+                    "type": "string",
+                    "description": "Medication-related recommendations"
+                }
+            }
+        },
+        "progress_assessment": {
+            "type": "object",
+            "properties": {
+                "overall_progress": {
+                    "type": "string",
+                    "enum": ["significant_improvement", "moderate_improvement", "slight_improvement", "stable", "slight_deterioration", "significant_deterioration"],
+                    "description": "Overall progress assessment"
+                },
+                "progress_narrative": {
+                    "type": "string",
+                    "description": "Detailed narrative of progress"
+                },
+                "symptoms_improved": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of symptoms that improved"
+                },
+                "symptoms_unchanged": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of symptoms that remained unchanged"
+                },
+                "symptoms_worsened": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of symptoms that worsened"
+                },
+                "new_symptoms": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "New symptoms that developed"
+                }
+            }
+        },
+        "improvement_indicators": {
+            "type": "array",
+            "description": "Objective indicators of improvement",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "indicator": {"type": "string", "description": "Name of indicator"},
+                    "baseline_value": {"type": "string", "description": "Initial value"},
+                    "current_value": {"type": "string", "description": "Current value"},
+                    "change_percent": {"type": "number", "description": "Percentage change"},
+                    "interpretation": {"type": "string", "description": "What this change means"}
+                }
+            }
+        },
+        "photo_comparison_analysis": {
+            "type": "object",
+            "properties": {
+                "before_description": {
+                    "type": "string",
+                    "description": "Description of before photo findings"
+                },
+                "after_description": {
+                    "type": "string",
+                    "description": "Description of after photo findings"
+                },
+                "changes_observed": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of visible changes"
+                },
+                "improvement_assessment": {
+                    "type": "string",
+                    "description": "Overall assessment of visual improvement"
+                },
+                "visual_improvement_score": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Visual improvement score (0-100)"
+                }
+            }
+        },
+        "current_status_assessment": {
+            "type": "string",
+            "description": "Assessment of current disease/condition status"
+        },
+        "recommended_next_steps": {
+            "type": "array",
+            "description": "Recommended next steps for treatment",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "step": {"type": "string", "description": "Recommended action"},
+                    "priority": {
+                        "type": "string",
+                        "enum": ["immediate", "high", "medium", "low"],
+                        "description": "Priority level"
+                    },
+                    "rationale": {"type": "string", "description": "Why this is recommended"},
+                    "timeline": {"type": "string", "description": "When this should be done"}
+                }
+            }
+        },
+        "follow_up_recommendations": {
+            "type": "object",
+            "properties": {
+                "recommended_interval": {
+                    "type": "string",
+                    "description": "Recommended follow-up interval"
+                },
+                "parameters_to_monitor": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Parameters to monitor at follow-up"
+                },
+                "tests_to_repeat": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Tests to repeat at follow-up"
+                },
+                "warning_signs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Warning signs to watch for"
+                }
+            }
+        },
+        "red_flags": {
+            "type": "array",
+            "description": "Current red flags or concerns",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "flag": {"type": "string", "description": "The red flag"},
+                    "severity": {
+                        "type": "string",
+                        "enum": ["critical", "high", "moderate", "low"],
+                        "description": "Severity level"
+                    },
+                    "action_required": {"type": "string", "description": "Required action"},
+                    "urgency": {"type": "string", "description": "How urgently to act"}
+                }
+            }
+        },
+        "patient_friendly_summary": {
+            "type": "string",
+            "description": "Summary in simple, patient-friendly language"
+        },
+        "confidence_score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Confidence in the analysis (0-1)"
+        }
+    },
+    "required": ["case_overview", "progress_assessment", "treatment_effectiveness", "recommended_next_steps", "confidence_score"]
+}
+
+# ============================================================================
+# PHOTO COMPARISON ANALYSIS SCHEMA
+# Used for analyzing before/after photos for visual progress assessment
+# ============================================================================
+
+PHOTO_COMPARISON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "before_photo_analysis": {
+            "type": "object",
+            "properties": {
+                "visible_condition": {
+                    "type": "string",
+                    "description": "Description of the visible condition in the before photo"
+                },
+                "affected_area": {
+                    "type": "string",
+                    "description": "Description of the affected area (size, location)"
+                },
+                "severity_assessment": {
+                    "type": "string",
+                    "enum": ["mild", "moderate", "severe", "very_severe"],
+                    "description": "Severity of the visible condition"
+                },
+                "characteristics": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of observed characteristics (color, texture, shape, etc.)"
+                },
+                "measurements_noted": {
+                    "type": "string",
+                    "description": "Any measurements or size estimates"
+                }
+            }
+        },
+        "after_photo_analysis": {
+            "type": "object",
+            "properties": {
+                "visible_condition": {
+                    "type": "string",
+                    "description": "Description of the visible condition in the after photo"
+                },
+                "affected_area": {
+                    "type": "string",
+                    "description": "Description of the affected area (size, location)"
+                },
+                "severity_assessment": {
+                    "type": "string",
+                    "enum": ["resolved", "minimal", "mild", "moderate", "severe", "very_severe"],
+                    "description": "Current severity of the visible condition"
+                },
+                "characteristics": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of observed characteristics"
+                },
+                "healing_signs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Signs of healing observed"
+                }
+            }
+        },
+        "comparison_summary": {
+            "type": "object",
+            "properties": {
+                "overall_change": {
+                    "type": "string",
+                    "enum": ["complete_resolution", "significant_improvement", "moderate_improvement", "slight_improvement", "no_change", "slight_worsening", "significant_worsening"],
+                    "description": "Overall change assessment"
+                },
+                "improvement_areas": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Specific areas of improvement"
+                },
+                "areas_of_concern": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Areas that remain concerning or have worsened"
+                },
+                "size_change": {
+                    "type": "string",
+                    "description": "Description of size change"
+                },
+                "color_change": {
+                    "type": "string",
+                    "description": "Description of color changes"
+                },
+                "texture_change": {
+                    "type": "string",
+                    "description": "Description of texture changes"
+                }
+            }
+        },
+        "visual_improvement_score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Visual improvement score (0=no improvement/worse, 50=no change, 100=complete resolution)"
+        },
+        "treatment_response_assessment": {
+            "type": "string",
+            "description": "Assessment of how well the condition is responding to treatment based on visual evidence"
+        },
+        "clinical_implications": {
+            "type": "string",
+            "description": "Clinical implications of the observed changes"
+        },
+        "recommendations_based_on_photos": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Recommendations based on visual progress"
+        },
+        "need_for_continued_treatment": {
+            "type": "string",
+            "enum": ["completed", "continue_same", "modify_treatment", "escalate_treatment", "specialist_referral"],
+            "description": "Assessment of whether treatment should continue"
+        },
+        "patient_friendly_explanation": {
+            "type": "string",
+            "description": "Simple explanation of the visual changes for patient"
+        },
+        "confidence_score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Confidence in the comparison analysis"
+        }
+    },
+    "required": ["before_photo_analysis", "after_photo_analysis", "comparison_summary", "visual_improvement_score", "confidence_score"]
+}

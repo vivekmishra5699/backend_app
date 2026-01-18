@@ -327,12 +327,48 @@ class DatabaseManager:
             print(f"Supabase insert response: {response}")
             
             if response.data:
-                return response.data[0]
+                created_visit = response.data[0]
+                
+                # Update case stats if visit is part of a case
+                if visit_data.get("case_id"):
+                    await self._update_case_visit_stats(visit_data["case_id"], visit_data.get("doctor_firebase_uid"))
+                
+                return created_visit
             return None
         except Exception as e:
             print(f"Error creating visit: {e}")
             print(f"Traceback: {traceback.format_exc()}")
             return None
+    
+    async def _update_case_visit_stats(self, case_id: int, doctor_firebase_uid: str) -> None:
+        """Update case statistics after visit changes"""
+        try:
+            # Count visits for this case
+            visits_response = await self.supabase.table("visits").select("id, visit_date").eq("case_id", case_id).execute()
+            total_visits = len(visits_response.data) if visits_response.data else 0
+            
+            # Get the most recent visit date
+            last_visit_date = None
+            if visits_response.data:
+                dates = [v.get("visit_date") for v in visits_response.data if v.get("visit_date")]
+                if dates:
+                    last_visit_date = max(dates)
+            
+            # Update case stats
+            update_data = {
+                "total_visits": total_visits,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }
+            if last_visit_date:
+                update_data["last_visit_date"] = last_visit_date
+            
+            await self.supabase.table("patient_cases").update(update_data).eq("id", case_id).execute()
+            
+            # Invalidate case cache
+            if self.cache:
+                await self.cache.delete(f"case:{case_id}:{doctor_firebase_uid}")
+        except Exception as e:
+            print(f"Warning: Could not update case stats for case {case_id}: {e}")
 
     async def update_visit(self, visit_id: int, doctor_firebase_uid: str, update_data: Dict[str, Any]) -> bool:
         """Update visit record"""
@@ -343,9 +379,9 @@ class DatabaseManager:
             # Invalidate cache on update
             if self.cache and response.data:
                 await self.cache.delete(f"visit:{visit_id}:{doctor_firebase_uid}")
-                # Also invalidate child_visits cache if parent_visit_id changed
-                if "parent_visit_id" in update_data and update_data["parent_visit_id"]:
-                    await self.cache.delete(f"child_visits:{update_data['parent_visit_id']}:{doctor_firebase_uid}")
+                # Invalidate case visits cache if case_id changed
+                if "case_id" in update_data and update_data["case_id"]:
+                    await self.cache.delete(f"case_visits:{update_data['case_id']}:{doctor_firebase_uid}")
             
             return bool(response.data)
         except Exception as e:
@@ -354,82 +390,46 @@ class DatabaseManager:
             return False
 
     async def get_child_visits(self, parent_visit_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
-        """Get all child visits (follow-ups) for a parent visit (CACHED)"""
-        try:
-            # Check cache first
-            if self.cache:
-                cache_key = f"child_visits:{parent_visit_id}:{doctor_firebase_uid}"
-                cached_result = await self.cache.get(cache_key)
-                if cached_result is not None:
-                    return cached_result
-            
-            # Get all visits that have this visit as their parent
-            response = await self.supabase.table("visits").select("*").eq("parent_visit_id", parent_visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).order("visit_date", desc=True).execute()
-            
-            result = response.data if response.data else []
-            
-            # Cache result
-            if self.cache:
-                cache_key = f"child_visits:{parent_visit_id}:{doctor_firebase_uid}"
-                await self.cache.set(cache_key, result, ttl=300)  # Cache for 5 minutes
-            
-            return result
-        except Exception as e:
-            print(f"Error fetching child visits: {e}")
-            print(f"Traceback: {traceback.format_exc()}")
-            return []
+        """
+        DEPRECATED: Use get_visits_by_case() instead.
+        
+        This method no longer works - parent_visit_id column has been removed.
+        Returns empty list. Use get_visits_by_case() for case-based visit linking.
+        """
+        print("WARNING: get_child_visits() is deprecated and no longer functional. Use get_visits_by_case() instead.")
+        return []
 
     async def get_visit_chain(self, visit_id: int, doctor_firebase_uid: str) -> List[Dict[str, Any]]:
-        """Get the full visit chain from root to current visit"""
+        """
+        DEPRECATED: Use get_visits_by_case() instead.
+        
+        Returns visits from the same case if visit belongs to a case.
+        """
+        print("WARNING: get_visit_chain() is deprecated. Use get_visits_by_case() instead.")
         try:
-            print(f"Building visit chain for visit: {visit_id}")
+            visit = await self.get_visit_by_id(visit_id, doctor_firebase_uid)
+            if not visit:
+                return []
             
-            chain = []
-            current_id = visit_id
+            # If visit has a case, return all visits in that case
+            if visit.get("case_id"):
+                return await self.get_visits_by_case(visit["case_id"], doctor_firebase_uid)
             
-            # Walk up the chain to find all ancestors
-            while current_id:
-                visit = await self.get_visit_by_id(current_id, doctor_firebase_uid)
-                if not visit:
-                    break
-                chain.insert(0, visit)  # Insert at beginning to maintain order (root first)
-                current_id = visit.get("parent_visit_id")
-            
-            return chain
+            # No case - return just the single visit
+            return [visit]
         except Exception as e:
             print(f"Error building visit chain: {e}")
-            print(f"Traceback: {traceback.format_exc()}")
             return []
 
     async def link_visit_to_parent(self, visit_id: int, parent_visit_id: int, doctor_firebase_uid: str, link_reason: Optional[str] = None) -> bool:
-        """Link an existing visit to a parent visit"""
-        try:
-            print(f"Linking visit {visit_id} to parent {parent_visit_id}")
-            
-            # Verify both visits exist and belong to the doctor
-            visit = await self.get_visit_by_id(visit_id, doctor_firebase_uid)
-            parent = await self.get_visit_by_id(parent_visit_id, doctor_firebase_uid)
-            
-            if not visit or not parent:
-                print("Visit or parent visit not found")
-                return False
-            
-            # Verify they belong to the same patient
-            if visit.get("patient_id") != parent.get("patient_id"):
-                print("Visits belong to different patients")
-                return False
-            
-            # Update the visit with the parent reference
-            update_data = {"parent_visit_id": parent_visit_id}
-            if link_reason:
-                update_data["link_reason"] = link_reason
-            
-            response = await self.supabase.table("visits").update(update_data).eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
-            return bool(response.data)
-        except Exception as e:
-            print(f"Error linking visit to parent: {e}")
-            print(f"Traceback: {traceback.format_exc()}")
-            return False
+        """
+        DEPRECATED: Use assign_visit_to_case() instead.
+        
+        This method no longer works - parent_visit_id column has been removed.
+        Returns False. Use assign_visit_to_case() for case-based visit linking.
+        """
+        print("WARNING: link_visit_to_parent() is deprecated and no longer functional. Use assign_visit_to_case() instead.")
+        return False
 
     async def delete_visit(self, visit_id: int, doctor_firebase_uid: str) -> bool:
         """Delete visit record and all associated reports, AI analyses, and patient history analyses.
@@ -439,9 +439,10 @@ class DatabaseManager:
         try:
             print(f"Deleting visit {visit_id} for doctor {doctor_firebase_uid}")
             
-            # Get the patient_id before deleting the visit (needed for cleanup)
-            visit_data = await self.supabase.table("visits").select("patient_id").eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
+            # Get the patient_id and case_id before deleting the visit (needed for cleanup)
+            visit_data = await self.supabase.table("visits").select("patient_id, case_id").eq("id", visit_id).eq("doctor_firebase_uid", doctor_firebase_uid).execute()
             patient_id = visit_data.data[0]["patient_id"] if visit_data.data else None
+            case_id = visit_data.data[0].get("case_id") if visit_data.data else None
             
             # Helper function to safely delete from a table
             async def safe_delete(table_name: str, filter_column: str = "visit_id"):
@@ -485,6 +486,10 @@ class DatabaseManager:
                 if patient_id:
                     print(f"Cleaning up patient history analyses for patient {patient_id} due to visit deletion")
                     await self.delete_patient_history_analyses_by_patient(patient_id, doctor_firebase_uid)
+                
+                # Update case stats if visit was part of a case
+                if case_id:
+                    await self._update_case_visit_stats(case_id, doctor_firebase_uid)
                 
                 return True
             else:
@@ -3999,3 +4004,768 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error extracting and storing lab values: {e}")
             return 0
+
+    # ============================================================
+    # CASE/EPISODE OF CARE METHODS
+    # ============================================================
+    
+    async def create_case(
+        self,
+        patient_id: int,
+        doctor_firebase_uid: str,
+        case_data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Create a new case/episode of care for a patient."""
+        try:
+            insert_data = {
+                "patient_id": patient_id,
+                "doctor_firebase_uid": doctor_firebase_uid,
+                "case_title": case_data["case_title"],
+                "case_type": case_data.get("case_type", "acute"),
+                "chief_complaint": case_data["chief_complaint"],
+                "initial_diagnosis": case_data.get("initial_diagnosis"),
+                "body_parts_affected": case_data.get("body_parts_affected", []),
+                "status": "active",
+                "severity": case_data.get("severity", "moderate"),
+                "priority": case_data.get("priority", 2),
+                "expected_resolution_date": case_data.get("expected_resolution_date"),
+                "next_follow_up_date": case_data.get("next_follow_up_date"),
+                "tags": case_data.get("tags", []),
+                "notes": case_data.get("notes"),
+                "started_at": datetime.now().isoformat()
+            }
+            
+            result = await self.client.table("patient_cases").insert(insert_data).execute()
+            
+            if result.data and len(result.data) > 0:
+                return result.data[0]
+            return None
+        except Exception as e:
+            print(f"Error creating case: {e}")
+            return None
+
+    async def get_case_by_id(
+        self,
+        case_id: int,
+        doctor_firebase_uid: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get a case by ID."""
+        try:
+            result = await self.client.table("patient_cases")\
+                .select("*")\
+                .eq("id", case_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .single()\
+                .execute()
+            
+            return result.data if result.data else None
+        except Exception as e:
+            print(f"Error getting case: {e}")
+            return None
+
+    async def get_cases_by_patient(
+        self,
+        patient_id: int,
+        doctor_firebase_uid: str,
+        status: Optional[str] = None,
+        include_resolved: bool = True,
+        limit: int = 50,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get all cases for a patient."""
+        try:
+            query = self.client.table("patient_cases")\
+                .select("*")\
+                .eq("patient_id", patient_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)
+            
+            if status:
+                query = query.eq("status", status)
+            elif not include_resolved:
+                query = query.neq("status", "resolved").neq("status", "closed")
+            
+            result = await query\
+                .order("started_at", desc=True)\
+                .range(offset, offset + limit - 1)\
+                .execute()
+            
+            return result.data if result.data else []
+        except Exception as e:
+            print(f"Error getting cases for patient: {e}")
+            return []
+
+    async def get_active_cases_by_doctor(
+        self,
+        doctor_firebase_uid: str,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """Get all active cases for a doctor."""
+        try:
+            result = await self.client.table("patient_cases")\
+                .select("*, patients(id, full_name, phone_number)")\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .in_("status", ["active", "ongoing"])\
+                .order("last_visit_date", desc=True)\
+                .range(offset, offset + limit - 1)\
+                .execute()
+            
+            return result.data if result.data else []
+        except Exception as e:
+            print(f"Error getting active cases: {e}")
+            return []
+
+    async def update_case(
+        self,
+        case_id: int,
+        doctor_firebase_uid: str,
+        update_data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Update a case."""
+        try:
+            # Remove None values and empty strings
+            filtered_data = {k: v for k, v in update_data.items() if v is not None}
+            
+            if not filtered_data:
+                return await self.get_case_by_id(case_id, doctor_firebase_uid)
+            
+            result = await self.client.table("patient_cases")\
+                .update(filtered_data)\
+                .eq("id", case_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .execute()
+            
+            if result.data and len(result.data) > 0:
+                return result.data[0]
+            return None
+        except Exception as e:
+            print(f"Error updating case: {e}")
+            return None
+
+    async def resolve_case(
+        self,
+        case_id: int,
+        doctor_firebase_uid: str,
+        outcome: str,
+        final_diagnosis: Optional[str] = None,
+        outcome_notes: Optional[str] = None,
+        patient_satisfaction: Optional[int] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve/close a case with outcome information."""
+        try:
+            update_data = {
+                "status": "resolved",
+                "resolved_at": datetime.now().isoformat(),
+                "outcome": outcome,
+                "final_diagnosis": final_diagnosis,
+                "outcome_notes": outcome_notes,
+                "patient_satisfaction": patient_satisfaction
+            }
+            
+            # Remove None values
+            update_data = {k: v for k, v in update_data.items() if v is not None}
+            
+            result = await self.client.table("patient_cases")\
+                .update(update_data)\
+                .eq("id", case_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .execute()
+            
+            if result.data and len(result.data) > 0:
+                return result.data[0]
+            return None
+        except Exception as e:
+            print(f"Error resolving case: {e}")
+            return None
+
+    async def delete_case(
+        self,
+        case_id: int,
+        doctor_firebase_uid: str
+    ) -> bool:
+        """Delete a case (soft delete by marking as deleted or hard delete if no visits)."""
+        try:
+            # Check if case has any visits
+            case = await self.get_case_by_id(case_id, doctor_firebase_uid)
+            if not case:
+                return False
+            
+            if case.get("total_visits", 0) > 0:
+                # Soft delete - just mark as closed
+                await self.update_case(case_id, doctor_firebase_uid, {"status": "closed"})
+                return True
+            
+            # Hard delete if no visits
+            result = await self.client.table("patient_cases")\
+                .delete()\
+                .eq("id", case_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .execute()
+            
+            return True
+        except Exception as e:
+            print(f"Error deleting case: {e}")
+            return False
+
+    # ============================================================
+    # CASE PHOTO METHODS
+    # ============================================================
+    
+    async def add_case_photo(
+        self,
+        case_id: int,
+        doctor_firebase_uid: str,
+        photo_data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Add a photo to a case."""
+        try:
+            # Get next sequence number for this photo type
+            existing = await self.client.table("case_photos")\
+                .select("sequence_number")\
+                .eq("case_id", case_id)\
+                .eq("photo_type", photo_data["photo_type"])\
+                .order("sequence_number", desc=True)\
+                .limit(1)\
+                .execute()
+            
+            next_sequence = 1
+            if existing.data and len(existing.data) > 0:
+                next_sequence = existing.data[0]["sequence_number"] + 1
+            
+            insert_data = {
+                "case_id": case_id,
+                "doctor_firebase_uid": doctor_firebase_uid,
+                "visit_id": photo_data.get("visit_id"),
+                "photo_type": photo_data["photo_type"],
+                "sequence_number": next_sequence,
+                "file_name": photo_data["file_name"],
+                "file_url": photo_data["file_url"],
+                "file_size": photo_data.get("file_size"),
+                "file_type": photo_data.get("file_type"),
+                "storage_path": photo_data.get("storage_path"),
+                "thumbnail_url": photo_data.get("thumbnail_url"),
+                "body_part": photo_data.get("body_part"),
+                "body_part_detail": photo_data.get("body_part_detail"),
+                "description": photo_data.get("description"),
+                "clinical_notes": photo_data.get("clinical_notes"),
+                "photo_taken_at": photo_data.get("photo_taken_at"),
+                "is_primary": photo_data.get("is_primary", False),
+                "uploaded_at": datetime.now().isoformat()
+            }
+            
+            result = await self.client.table("case_photos").insert(insert_data).execute()
+            
+            if result.data and len(result.data) > 0:
+                return result.data[0]
+            return None
+        except Exception as e:
+            print(f"Error adding case photo: {e}")
+            return None
+
+    async def get_case_photos(
+        self,
+        case_id: int,
+        doctor_firebase_uid: str,
+        photo_type: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Get all photos for a case, optionally filtered by type."""
+        try:
+            query = self.client.table("case_photos")\
+                .select("*")\
+                .eq("case_id", case_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)
+            
+            if photo_type:
+                query = query.eq("photo_type", photo_type)
+            
+            result = await query\
+                .order("photo_type")\
+                .order("sequence_number")\
+                .execute()
+            
+            return result.data if result.data else []
+        except Exception as e:
+            print(f"Error getting case photos: {e}")
+            return []
+
+    async def get_case_photo_by_id(
+        self,
+        photo_id: int,
+        doctor_firebase_uid: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get a case photo by ID."""
+        try:
+            result = await self.client.table("case_photos")\
+                .select("*")\
+                .eq("id", photo_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .single()\
+                .execute()
+            
+            return result.data if result.data else None
+        except Exception as e:
+            print(f"Error getting case photo: {e}")
+            return None
+
+    async def update_case_photo(
+        self,
+        photo_id: int,
+        doctor_firebase_uid: str,
+        update_data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Update a case photo."""
+        try:
+            filtered_data = {k: v for k, v in update_data.items() if v is not None}
+            
+            if not filtered_data:
+                return await self.get_case_photo_by_id(photo_id, doctor_firebase_uid)
+            
+            result = await self.client.table("case_photos")\
+                .update(filtered_data)\
+                .eq("id", photo_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .execute()
+            
+            if result.data and len(result.data) > 0:
+                return result.data[0]
+            return None
+        except Exception as e:
+            print(f"Error updating case photo: {e}")
+            return None
+
+    async def delete_case_photo(
+        self,
+        photo_id: int,
+        doctor_firebase_uid: str
+    ) -> bool:
+        """Delete a case photo."""
+        try:
+            result = await self.client.table("case_photos")\
+                .delete()\
+                .eq("id", photo_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .execute()
+            
+            return True
+        except Exception as e:
+            print(f"Error deleting case photo: {e}")
+            return False
+
+    async def set_primary_photo(
+        self,
+        case_id: int,
+        photo_id: int,
+        doctor_firebase_uid: str
+    ) -> bool:
+        """Set a photo as primary for its type within a case."""
+        try:
+            # Get the photo to know its type
+            photo = await self.get_case_photo_by_id(photo_id, doctor_firebase_uid)
+            if not photo or photo["case_id"] != case_id:
+                return False
+            
+            # Clear other primary flags for this type
+            await self.client.table("case_photos")\
+                .update({"is_primary": False})\
+                .eq("case_id", case_id)\
+                .eq("photo_type", photo["photo_type"])\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .execute()
+            
+            # Set this one as primary
+            await self.client.table("case_photos")\
+                .update({"is_primary": True})\
+                .eq("id", photo_id)\
+                .execute()
+            
+            return True
+        except Exception as e:
+            print(f"Error setting primary photo: {e}")
+            return False
+
+    async def get_before_after_photos(
+        self,
+        case_id: int,
+        doctor_firebase_uid: str
+    ) -> Dict[str, Any]:
+        """Get before and after photos comparison for a case."""
+        try:
+            photos = await self.get_case_photos(case_id, doctor_firebase_uid)
+            
+            before_photos = [p for p in photos if p["photo_type"] == "before"]
+            progress_photos = [p for p in photos if p["photo_type"] == "progress"]
+            after_photos = [p for p in photos if p["photo_type"] == "after"]
+            
+            # Get primary or first photo for each type
+            before_primary = next((p for p in before_photos if p.get("is_primary")), 
+                                  before_photos[0] if before_photos else None)
+            after_primary = next((p for p in after_photos if p.get("is_primary")), 
+                                 after_photos[0] if after_photos else None)
+            
+            return {
+                "before_photo": before_primary,
+                "after_photo": after_primary,
+                "progress_photos": progress_photos,
+                "all_before_photos": before_photos,
+                "all_after_photos": after_photos
+            }
+        except Exception as e:
+            print(f"Error getting before/after photos: {e}")
+            return {}
+
+    # ============================================================
+    # CASE ANALYSIS METHODS
+    # ============================================================
+    
+    async def create_case_analysis(
+        self,
+        case_id: int,
+        patient_id: int,
+        doctor_firebase_uid: str,
+        analysis_data: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Create a new AI analysis for a case."""
+        try:
+            insert_data = {
+                "case_id": case_id,
+                "patient_id": patient_id,
+                "doctor_firebase_uid": doctor_firebase_uid,
+                "analysis_type": analysis_data.get("analysis_type", "comprehensive"),
+                "model_used": analysis_data.get("model_used", "gemini-2.0-flash"),
+                "confidence_score": analysis_data.get("confidence_score"),
+                "visits_analyzed": analysis_data.get("visits_analyzed", []),
+                "reports_analyzed": analysis_data.get("reports_analyzed", []),
+                "photos_analyzed": analysis_data.get("photos_analyzed", []),
+                "case_overview": analysis_data.get("case_overview"),
+                "presenting_complaint_summary": analysis_data.get("presenting_complaint_summary"),
+                "clinical_findings_summary": analysis_data.get("clinical_findings_summary"),
+                "diagnosis_assessment": analysis_data.get("diagnosis_assessment"),
+                "treatment_timeline": analysis_data.get("treatment_timeline"),
+                "treatment_effectiveness": analysis_data.get("treatment_effectiveness"),
+                "treatment_effectiveness_score": analysis_data.get("treatment_effectiveness_score"),
+                "medications_analysis": analysis_data.get("medications_analysis"),
+                "progress_assessment": analysis_data.get("progress_assessment"),
+                "improvement_indicators": analysis_data.get("improvement_indicators"),
+                "photo_comparison_analysis": analysis_data.get("photo_comparison_analysis"),
+                "visual_improvement_score": analysis_data.get("visual_improvement_score"),
+                "current_status_assessment": analysis_data.get("current_status_assessment"),
+                "recommended_next_steps": analysis_data.get("recommended_next_steps"),
+                "follow_up_recommendations": analysis_data.get("follow_up_recommendations"),
+                "red_flags": analysis_data.get("red_flags", []),
+                "patient_friendly_summary": analysis_data.get("patient_friendly_summary"),
+                "analysis_success": analysis_data.get("analysis_success", True),
+                "analysis_error": analysis_data.get("analysis_error"),
+                "analyzed_at": datetime.now().isoformat()
+            }
+            
+            result = await self.client.table("ai_case_analysis").insert(insert_data).execute()
+            
+            if result.data and len(result.data) > 0:
+                analysis = result.data[0]
+                
+                # Update case with latest analysis reference and AI summary
+                update_case_data = {
+                    "latest_ai_analysis_id": analysis["id"]
+                }
+                if analysis.get("treatment_effectiveness_score"):
+                    update_case_data["ai_treatment_effectiveness"] = analysis["treatment_effectiveness_score"]
+                if analysis.get("case_overview"):
+                    update_case_data["ai_summary"] = analysis["case_overview"]
+                
+                await self.update_case(case_id, doctor_firebase_uid, update_case_data)
+                
+                return analysis
+            return None
+        except Exception as e:
+            print(f"Error creating case analysis: {e}")
+            return None
+
+    async def get_case_analysis(
+        self,
+        analysis_id: int,
+        doctor_firebase_uid: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get a case analysis by ID."""
+        try:
+            result = await self.client.table("ai_case_analysis")\
+                .select("*")\
+                .eq("id", analysis_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .single()\
+                .execute()
+            
+            return result.data if result.data else None
+        except Exception as e:
+            print(f"Error getting case analysis: {e}")
+            return None
+
+    async def get_case_analyses(
+        self,
+        case_id: int,
+        doctor_firebase_uid: str,
+        limit: int = 10
+    ) -> List[Dict[str, Any]]:
+        """Get all analyses for a case."""
+        try:
+            result = await self.client.table("ai_case_analysis")\
+                .select("*")\
+                .eq("case_id", case_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .order("analyzed_at", desc=True)\
+                .limit(limit)\
+                .execute()
+            
+            return result.data if result.data else []
+        except Exception as e:
+            print(f"Error getting case analyses: {e}")
+            return []
+
+    async def get_latest_case_analysis(
+        self,
+        case_id: int,
+        doctor_firebase_uid: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get the most recent analysis for a case."""
+        try:
+            result = await self.client.table("ai_case_analysis")\
+                .select("*")\
+                .eq("case_id", case_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .order("analyzed_at", desc=True)\
+                .limit(1)\
+                .execute()
+            
+            return result.data[0] if result.data and len(result.data) > 0 else None
+        except Exception as e:
+            print(f"Error getting latest case analysis: {e}")
+            return None
+
+    # ============================================================
+    # VISIT-CASE RELATIONSHIP METHODS
+    # ============================================================
+    
+    async def assign_visit_to_case(
+        self,
+        visit_id: int,
+        case_id: int,
+        doctor_firebase_uid: str,
+        is_case_opener: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """Assign an existing visit to a case."""
+        try:
+            # Verify visit and case belong to same doctor
+            visit = await self.get_visit_by_id(visit_id, doctor_firebase_uid)
+            case = await self.get_case_by_id(case_id, doctor_firebase_uid)
+            
+            if not visit or not case:
+                return None
+            
+            # Update visit with case_id
+            result = await self.client.table("visits")\
+                .update({
+                    "case_id": case_id,
+                    "is_case_opener": is_case_opener
+                })\
+                .eq("id", visit_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .execute()
+            
+            if result.data and len(result.data) > 0:
+                # Update case stats after assignment
+                await self._update_case_visit_stats(case_id, doctor_firebase_uid)
+                return result.data[0]
+            return None
+        except Exception as e:
+            print(f"Error assigning visit to case: {e}")
+            return None
+
+    async def remove_visit_from_case(
+        self,
+        visit_id: int,
+        doctor_firebase_uid: str
+    ) -> Optional[Dict[str, Any]]:
+        """Remove a visit from its case."""
+        try:
+            # Get the case_id before removal (needed for stats update)
+            visit = await self.get_visit_by_id(visit_id, doctor_firebase_uid)
+            old_case_id = visit.get("case_id") if visit else None
+            
+            result = await self.client.table("visits")\
+                .update({
+                    "case_id": None,
+                    "is_case_opener": False
+                })\
+                .eq("id", visit_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .execute()
+            
+            if result.data and len(result.data) > 0:
+                # Update old case stats after removal
+                if old_case_id:
+                    await self._update_case_visit_stats(old_case_id, doctor_firebase_uid)
+                return result.data[0]
+            return None
+        except Exception as e:
+            print(f"Error removing visit from case: {e}")
+            return None
+
+    async def get_visits_by_case(
+        self,
+        case_id: int,
+        doctor_firebase_uid: str
+    ) -> List[Dict[str, Any]]:
+        """Get all visits for a case."""
+        try:
+            result = await self.client.table("visits")\
+                .select("*")\
+                .eq("case_id", case_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .order("visit_date", desc=True)\
+                .execute()
+            
+            return result.data if result.data else []
+        except Exception as e:
+            print(f"Error getting visits by case: {e}")
+            return []
+
+    async def get_case_with_details(
+        self,
+        case_id: int,
+        doctor_firebase_uid: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get a case with all related data (visits, photos, reports, analysis)."""
+        try:
+            # Get the case
+            case = await self.get_case_by_id(case_id, doctor_firebase_uid)
+            if not case:
+                return None
+            
+            # Get related data in parallel would be nice, but we'll do sequential for safety
+            visits = await self.get_visits_by_case(case_id, doctor_firebase_uid)
+            photos = await self.get_case_photos(case_id, doctor_firebase_uid)
+            latest_analysis = await self.get_latest_case_analysis(case_id, doctor_firebase_uid)
+            
+            # Get reports for the case
+            reports = []
+            if visits:
+                visit_ids = [v["id"] for v in visits]
+                reports_result = await self.client.table("reports")\
+                    .select("*")\
+                    .in_("visit_id", visit_ids)\
+                    .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                    .order("upload_date", desc=True)\
+                    .execute()
+                reports = reports_result.data if reports_result.data else []
+            
+            # Get patient info
+            patient = None
+            if case.get("patient_id"):
+                patient_result = await self.client.table("patients")\
+                    .select("full_name, phone_number")\
+                    .eq("id", case["patient_id"])\
+                    .single()\
+                    .execute()
+                patient = patient_result.data if patient_result.data else None
+            
+            return {
+                **case,
+                "visits": visits,
+                "photos": photos,
+                "reports": reports,
+                "latest_analysis": latest_analysis,
+                "patient_name": patient.get("full_name") if patient else None,
+                "patient_phone": patient.get("phone_number") if patient else None
+            }
+        except Exception as e:
+            print(f"Error getting case with details: {e}")
+            return None
+
+    async def get_case_timeline(
+        self,
+        case_id: int,
+        doctor_firebase_uid: str
+    ) -> Dict[str, Any]:
+        """Get a chronological timeline of events for a case."""
+        try:
+            case = await self.get_case_by_id(case_id, doctor_firebase_uid)
+            if not case:
+                return {"case_id": case_id, "events": [], "error": "Case not found"}
+            
+            events = []
+            
+            # Add case creation event
+            events.append({
+                "type": "case_created",
+                "date": case["started_at"],
+                "title": "Case Created",
+                "description": f"Case '{case['case_title']}' was created",
+                "data": {"case_title": case["case_title"], "chief_complaint": case["chief_complaint"]}
+            })
+            
+            # Get visits
+            visits = await self.get_visits_by_case(case_id, doctor_firebase_uid)
+            for visit in visits:
+                events.append({
+                    "type": "visit",
+                    "date": visit["visit_date"],
+                    "title": f"{visit['visit_type']} Visit",
+                    "description": visit.get("chief_complaint") or visit.get("diagnosis") or "Visit recorded",
+                    "data": {"visit_id": visit["id"], "diagnosis": visit.get("diagnosis")}
+                })
+            
+            # Get photos
+            photos = await self.get_case_photos(case_id, doctor_firebase_uid)
+            for photo in photos:
+                events.append({
+                    "type": "photo",
+                    "date": photo["uploaded_at"],
+                    "title": f"{photo['photo_type'].title()} Photo Added",
+                    "description": photo.get("description") or f"Photo of {photo.get('body_part', 'affected area')}",
+                    "data": {"photo_id": photo["id"], "photo_type": photo["photo_type"]}
+                })
+            
+            # Get analyses
+            analyses = await self.get_case_analyses(case_id, doctor_firebase_uid)
+            for analysis in analyses:
+                events.append({
+                    "type": "analysis",
+                    "date": analysis["analyzed_at"],
+                    "title": "AI Analysis",
+                    "description": f"{analysis['analysis_type'].replace('_', ' ').title()} analysis performed",
+                    "data": {"analysis_id": analysis["id"], "effectiveness_score": analysis.get("treatment_effectiveness_score")}
+                })
+            
+            # Add resolution event if resolved
+            if case.get("resolved_at"):
+                events.append({
+                    "type": "case_resolved",
+                    "date": case["resolved_at"],
+                    "title": "Case Resolved",
+                    "description": f"Outcome: {case.get('outcome', 'Unknown').replace('_', ' ').title()}",
+                    "data": {"outcome": case.get("outcome"), "final_diagnosis": case.get("final_diagnosis")}
+                })
+            
+            # Sort by date
+            events.sort(key=lambda x: x["date"])
+            
+            # Calculate total days
+            total_days = None
+            if len(events) >= 2:
+                try:
+                    from datetime import datetime as dt
+                    start = dt.fromisoformat(events[0]["date"].replace("Z", "+00:00"))
+                    end = dt.fromisoformat(events[-1]["date"].replace("Z", "+00:00"))
+                    total_days = (end - start).days
+                except:
+                    pass
+            
+            return {
+                "case_id": case_id,
+                "case_title": case["case_title"],
+                "status": case["status"],
+                "events": events,
+                "total_days": total_days
+            }
+        except Exception as e:
+            print(f"Error getting case timeline: {e}")
+            return {"case_id": case_id, "events": [], "error": str(e)}
