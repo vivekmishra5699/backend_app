@@ -43,6 +43,9 @@ CREATE TABLE IF NOT EXISTS public.appointment_reminders (
     max_retries integer DEFAULT 3,
     next_retry_at timestamp with time zone,
     
+    -- Manual vs Automatic
+    is_manual boolean DEFAULT false,   -- True if sent manually by doctor
+    
     -- Metadata
     message_content text,              -- Store the actual message sent
     metadata jsonb DEFAULT '{}'::jsonb,

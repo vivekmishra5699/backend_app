@@ -159,6 +159,18 @@ class AppointmentReminderService:
             # Scheduled send time is 24 hours before
             scheduled_send_time = appointment_datetime - timedelta(hours=self.default_hours_before)
             
+            # Only create and send reminder if:
+            # - Scheduled time is in the past or within 30 minutes from now
+            # - This catches appointments that need to be sent now
+            now = datetime.now(timezone.utc)
+            time_until_send = scheduled_send_time - now
+            
+            # Skip if reminder should be sent more than 30 minutes from now
+            # The service runs every 15 mins, so 30 mins gives buffer
+            if time_until_send > timedelta(minutes=30):
+                print(f"⏰ Appointment for {appointment['patient_name']} on {appointment_date}: reminder scheduled in {time_until_send}")
+                return  # Don't create record yet, will catch it in a later run
+            
             # Generate the message
             message = self._generate_reminder_message(appointment)
             
@@ -188,13 +200,8 @@ class AppointmentReminderService:
                 print(f"❌ Failed to create reminder record for patient {appointment['patient_name']}")
                 return
             
-            # Check if we should send immediately (if scheduled time is in the past or within 5 minutes)
-            now = datetime.now(timezone.utc)
-            if scheduled_send_time <= now + timedelta(minutes=5):
-                # Send immediately
-                await self._send_reminder(reminder["id"], appointment["patient_phone"], message)
-            else:
-                print(f"📅 Reminder scheduled for {appointment['patient_name']} at {scheduled_send_time}")
+            # Send immediately since we're within the 30-minute window
+            await self._send_reminder(reminder["id"], appointment["patient_phone"], message)
                 
         except Exception as e:
             print(f"❌ Error creating/sending reminder: {e}")

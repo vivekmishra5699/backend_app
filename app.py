@@ -9965,6 +9965,35 @@ Best regards,
             )
             
             if whatsapp_result.get("success"):
+                # Track the manual reminder in appointment_reminders table
+                # This prevents automatic reminders from being sent for the same appointment
+                try:
+                    reminder_data = {
+                        "visit_id": visit_id,
+                        "appointment_id": None,
+                        "patient_id": patient["id"],
+                        "doctor_firebase_uid": current_doctor["firebase_uid"],
+                        "appointment_date": follow_up_date,
+                        "appointment_time": follow_up_time,
+                        "patient_name": patient_name,
+                        "patient_phone": patient["phone"],
+                        "doctor_name": doctor_name,
+                        "hospital_name": hospital_name,
+                        "reminder_type": "24h_before",  # Use same type so it's tracked
+                        "scheduled_send_time": datetime.now(timezone.utc).isoformat(),
+                        "status": "sent",  # Mark as already sent
+                        "sent_at": datetime.now(timezone.utc).isoformat(),
+                        "message_content": message,
+                        "whatsapp_message_id": whatsapp_result.get("message_id"),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "is_manual": True  # Flag that this was sent manually
+                    }
+                    await db.create_appointment_reminder(reminder_data)
+                    print(f"📝 Manual reminder tracked for visit {visit_id}")
+                except Exception as track_error:
+                    # Don't fail the request if tracking fails
+                    print(f"⚠️ Failed to track manual reminder: {track_error}")
+                
                 return {
                     "message": "Appointment reminder sent successfully",
                     "visit_id": visit_id,
@@ -12367,53 +12396,6 @@ async def get_visit_summary(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get visit summary"
-        )
-
-@app.post("/visits/{visit_id}/summary/approve", response_model=dict, tags=["Clinical Intelligence"])
-async def approve_visit_summary(
-    visit_id: int,
-    current_doctor: dict = Depends(get_current_doctor)
-):
-    """
-    Approve a visit summary for final documentation.
-    
-    Marks the summary as reviewed and approved by the doctor.
-    """
-    try:
-        doctor_uid = current_doctor["firebase_uid"]
-        
-        # Get existing summary
-        summary = await db.get_visit_summary(visit_id, doctor_uid)
-        if not summary:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Visit summary not found. Generate one first."
-            )
-        
-        # Approve
-        success = await db.approve_visit_summary(
-            summary_id=summary["id"],
-            approved_by=doctor_uid
-        )
-        
-        if success:
-            return {
-                "success": True,
-                "message": "Visit summary approved",
-                "approved_at": datetime.now(timezone.utc).isoformat()
-            }
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to approve summary"
-            )
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Error approving visit summary: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to approve visit summary"
         )
 
 # -------------------------------------------------------------------------
@@ -14991,6 +14973,7 @@ async def analyze_case(
     """
     Trigger AI analysis for a case. Analyzes all visits, reports, and photos.
     If the case already has an analysis, returns the existing one unless force_reanalyze is set.
+    When force_reanalyze is True, the old analysis is deleted before creating a new one.
     """
     try:
         if not ai_analysis_service:
@@ -15000,9 +14983,14 @@ async def analyze_case(
             )
         
         # Check if case already has an analysis (unless force_reanalyze is requested)
-        if not getattr(request, 'force_reanalyze', False):
-            existing_analysis = await db.get_latest_case_analysis(case_id, current_doctor["firebase_uid"])
-            if existing_analysis and existing_analysis.get("analysis_success"):
+        existing_analysis = await db.get_latest_case_analysis(case_id, current_doctor["firebase_uid"])
+        
+        if existing_analysis:
+            if request.force_reanalyze:
+                # Delete the old analysis before creating a new one
+                print(f"Force reanalyze requested - deleting existing analysis {existing_analysis['id']} for case {case_id}")
+                await db.delete_case_analysis(existing_analysis["id"], current_doctor["firebase_uid"])
+            elif existing_analysis.get("analysis_success"):
                 print(f"Returning existing analysis for case {case_id}")
                 return existing_analysis
         
@@ -15091,6 +15079,97 @@ async def analyze_case(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to analyze case: {str(e)}"
         )
+
+
+@app.delete("/cases/{case_id}/analysis/{analysis_id}", response_model=dict, tags=["Case Analysis"])
+async def delete_case_analysis(
+    case_id: int,
+    analysis_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Delete/reject a case analysis.
+    Use this when the doctor does not approve of the AI analysis results.
+    The analysis will be permanently deleted.
+    """
+    try:
+        # Verify the analysis belongs to this case
+        analysis = await db.get_case_analysis(analysis_id, current_doctor["firebase_uid"])
+        if not analysis:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Analysis not found"
+            )
+        
+        if analysis.get("case_id") != case_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Analysis does not belong to this case"
+            )
+        
+        # Delete the analysis
+        success = await db.delete_case_analysis(analysis_id, current_doctor["firebase_uid"])
+        
+        if success:
+            return {
+                "message": "Analysis deleted successfully",
+                "analysis_id": analysis_id,
+                "case_id": case_id
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to delete analysis"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting case analysis: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete analysis: {str(e)}"
+        )
+
+
+@app.delete("/cases/{case_id}/analyses", response_model=dict, tags=["Case Analysis"])
+async def delete_all_case_analyses(
+    case_id: int,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Delete all analyses for a case.
+    Use this to clear all AI analysis history for a case.
+    """
+    try:
+        # Verify the case exists
+        case = await db.get_case_by_id(case_id, current_doctor["firebase_uid"])
+        if not case:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Case not found"
+            )
+        
+        # Delete all analyses
+        deleted_count = await db.delete_all_case_analyses(case_id, current_doctor["firebase_uid"])
+        
+        return {
+            "message": f"Deleted {deleted_count} analysis(es)",
+            "deleted_count": deleted_count,
+            "case_id": case_id
+        }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error deleting case analyses: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete analyses: {str(e)}"
+        )
+
 
 @app.post("/cases/{case_id}/compare-photos", response_model=dict, tags=["Case Analysis"])
 async def compare_case_photos(

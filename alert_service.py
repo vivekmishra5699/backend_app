@@ -266,7 +266,7 @@ class ClinicalAlertService:
                 "title": title,
                 "message": message[:2000] if message else "Critical finding detected",
                 "finding_data": finding,
-                "acknowledged": False,
+                "is_acknowledged": False,
                 "created_at": datetime.utcnow().isoformat()
             }
             
@@ -312,7 +312,7 @@ class ClinicalAlertService:
                 "title": title[:200],
                 "message": message[:2000],
                 "finding_data": finding,
-                "acknowledged": False,
+                "is_acknowledged": False,
                 "created_at": datetime.utcnow().isoformat()
             }
             
@@ -364,7 +364,7 @@ class ClinicalAlertService:
                         "title": "Treatment Concern",
                         "message": concern_text[:2000],
                         "finding_data": concern if isinstance(concern, dict) else {"concern": concern_text},
-                        "acknowledged": False,
+                        "is_acknowledged": False,
                         "created_at": datetime.utcnow().isoformat()
                     }
                     
@@ -396,7 +396,7 @@ class ClinicalAlertService:
                     "title": title[:200],
                     "message": effect[:2000],
                     "finding_data": interaction if isinstance(interaction, dict) else {"interaction": effect},
-                    "acknowledged": False,
+                    "is_acknowledged": False,
                     "created_at": datetime.utcnow().isoformat()
                 }
                 
@@ -432,7 +432,7 @@ class ClinicalAlertService:
             query = self.supabase.table("ai_clinical_alerts") \
                 .select("*") \
                 .eq("doctor_firebase_uid", doctor_firebase_uid) \
-                .eq("acknowledged", False) \
+                .eq("is_acknowledged", False) \
                 .order("created_at", desc=True) \
                 .limit(limit)
             
@@ -466,7 +466,7 @@ class ClinicalAlertService:
             # Use the database function if available, otherwise count manually
             result = self.supabase.rpc(
                 "get_alert_counts",
-                {"p_doctor_uid": doctor_firebase_uid}
+                {"p_doctor_firebase_uid": doctor_firebase_uid}
             ).execute()
             
             if result.data and len(result.data) > 0:
@@ -519,7 +519,7 @@ class ClinicalAlertService:
         """
         try:
             update_data = {
-                "acknowledged": True,
+                "is_acknowledged": True,
                 "acknowledged_at": datetime.utcnow().isoformat(),
                 "acknowledged_by": doctor_firebase_uid
             }
@@ -556,7 +556,7 @@ class ClinicalAlertService:
         """
         try:
             update_data = {
-                "acknowledged": True,
+                "is_acknowledged": True,
                 "acknowledged_at": datetime.utcnow().isoformat(),
                 "acknowledged_by": doctor_firebase_uid
             }
@@ -565,7 +565,7 @@ class ClinicalAlertService:
                 .update(update_data) \
                 .eq("patient_id", patient_id) \
                 .eq("doctor_firebase_uid", doctor_firebase_uid) \
-                .eq("acknowledged", False) \
+                .eq("is_acknowledged", False) \
                 .execute()
             
             return len(result.data) if result.data else 0
@@ -604,7 +604,7 @@ class ClinicalAlertService:
                 .order("created_at", desc=True)
             
             if not include_acknowledged:
-                query = query.eq("acknowledged", False)
+                query = query.eq("is_acknowledged", False)
             
             result = query.execute()
             return result.data or []

@@ -912,7 +912,7 @@ class DatabaseManager:
             query = self.supabase.table("ai_clinical_alerts") \
                 .select("*") \
                 .eq("doctor_firebase_uid", doctor_firebase_uid) \
-                .eq("acknowledged", False) \
+                .eq("is_acknowledged", False) \
                 .order("created_at", desc=True) \
                 .limit(limit)
             
@@ -948,7 +948,7 @@ class DatabaseManager:
             try:
                 response = await self.supabase.rpc(
                     "get_alert_counts",
-                    {"p_doctor_uid": doctor_firebase_uid}
+                    {"p_doctor_firebase_uid": doctor_firebase_uid}
                 ).execute()
                 
                 if response.data and len(response.data) > 0:
@@ -994,7 +994,7 @@ class DatabaseManager:
         """Acknowledge a clinical alert"""
         try:
             update_data = {
-                "acknowledged": True,
+                "is_acknowledged": True,
                 "acknowledged_at": datetime.now(timezone.utc).isoformat(),
                 "acknowledged_by": doctor_firebase_uid
             }
@@ -1028,7 +1028,7 @@ class DatabaseManager:
         """Acknowledge all alerts for a patient, returns count acknowledged"""
         try:
             update_data = {
-                "acknowledged": True,
+                "is_acknowledged": True,
                 "acknowledged_at": datetime.now(timezone.utc).isoformat(),
                 "acknowledged_by": doctor_firebase_uid
             }
@@ -1037,7 +1037,7 @@ class DatabaseManager:
                 .update(update_data) \
                 .eq("patient_id", patient_id) \
                 .eq("doctor_firebase_uid", doctor_firebase_uid) \
-                .eq("acknowledged", False) \
+                .eq("is_acknowledged", False) \
                 .execute()
             
             count = len(response.data) if response.data else 0
@@ -1092,7 +1092,7 @@ class DatabaseManager:
                 .order("created_at", desc=True)
             
             if not include_acknowledged:
-                query = query.eq("acknowledged", False)
+                query = query.eq("is_acknowledged", False)
             
             response = await query.execute()
             return response.data if response.data else []
@@ -3763,30 +3763,6 @@ class DatabaseManager:
             print(f"Error updating visit summary: {e}")
             return False
     
-    async def approve_visit_summary(
-        self, 
-        summary_id: int, 
-        approved_by: str
-    ) -> bool:
-        """Approve a visit summary"""
-        try:
-            update_data = {
-                "approved": True,
-                "approved_at": datetime.now(timezone.utc).isoformat(),
-                "approved_by": approved_by,
-                "updated_at": datetime.now(timezone.utc).isoformat()
-            }
-            
-            response = await self.supabase.table("visit_summaries")\
-                .update(update_data)\
-                .eq("id", summary_id)\
-                .execute()
-            
-            return bool(response.data)
-        except Exception as e:
-            print(f"Error approving visit summary: {e}")
-            return False
-    
     # -------------------------------------------------------------------------
     # Historical Lab Values (for Trend Analysis)
     # -------------------------------------------------------------------------
@@ -4535,6 +4511,81 @@ class DatabaseManager:
             print(f"Error getting latest case analysis: {e}")
             return None
 
+    async def delete_case_analysis(
+        self,
+        analysis_id: int,
+        doctor_firebase_uid: str
+    ) -> bool:
+        """Delete a specific case analysis."""
+        try:
+            # First get the analysis to check case_id
+            analysis = await self.get_case_analysis(analysis_id, doctor_firebase_uid)
+            if not analysis:
+                return False
+            
+            case_id = analysis.get("case_id")
+            
+            # Delete the analysis
+            result = await self.supabase.table("ai_case_analysis")\
+                .delete()\
+                .eq("id", analysis_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .execute()
+            
+            if result.data:
+                # Check if this was the latest analysis for the case
+                # If so, update case to point to the next latest (or null)
+                latest = await self.get_latest_case_analysis(case_id, doctor_firebase_uid)
+                update_data = {
+                    "latest_ai_analysis_id": latest["id"] if latest else None,
+                    "ai_summary": latest.get("structured_data", {}).get("case_overview") if latest else None,
+                    "ai_treatment_effectiveness": latest.get("structured_data", {}).get("treatment_effectiveness", {}).get("effectiveness_score") if latest else None
+                }
+                await self.update_case(case_id, doctor_firebase_uid, update_data)
+                
+                print(f"✅ Deleted case analysis {analysis_id}")
+                return True
+            return False
+        except Exception as e:
+            print(f"Error deleting case analysis: {e}")
+            return False
+
+    async def delete_all_case_analyses(
+        self,
+        case_id: int,
+        doctor_firebase_uid: str
+    ) -> int:
+        """Delete all analyses for a case. Returns count deleted."""
+        try:
+            # Get all analyses first to count them
+            analyses = await self.get_case_analyses(case_id, doctor_firebase_uid, limit=100)
+            
+            if not analyses:
+                return 0
+            
+            # Delete all analyses for this case
+            result = await self.supabase.table("ai_case_analysis")\
+                .delete()\
+                .eq("case_id", case_id)\
+                .eq("doctor_firebase_uid", doctor_firebase_uid)\
+                .execute()
+            
+            deleted_count = len(result.data) if result.data else 0
+            
+            if deleted_count > 0:
+                # Clear case analysis references
+                await self.update_case(case_id, doctor_firebase_uid, {
+                    "latest_ai_analysis_id": None,
+                    "ai_summary": None,
+                    "ai_treatment_effectiveness": None
+                })
+                print(f"✅ Deleted {deleted_count} analyses for case {case_id}")
+            
+            return deleted_count
+        except Exception as e:
+            print(f"Error deleting all case analyses: {e}")
+            return 0
+
     # ============================================================
     # VISIT-CASE RELATIONSHIP METHODS
     # ============================================================
@@ -4775,7 +4826,7 @@ class DatabaseManager:
         that need reminders sent within the specified hours window.
         
         Returns appointments where:
-        - The appointment is within the next `hours_before` hours
+        - The appointment is scheduled for tomorrow or within the reminder window
         - No reminder has been sent yet for this appointment/reminder_type combo
         - Patient has a phone number
         - Doctor has reminders enabled
@@ -4784,12 +4835,12 @@ class DatabaseManager:
             from datetime import datetime, timedelta, date
             
             now = datetime.now(timezone.utc)
-            reminder_window_start = now
-            reminder_window_end = now + timedelta(hours=hours_before + 1)  # +1 hour buffer
+            today = now.date()
             
-            # Calculate the appointment date range to check
-            target_date_start = (now + timedelta(hours=hours_before - 1)).date()  # -1 hour buffer
-            target_date_end = (now + timedelta(hours=hours_before + 2)).date()    # +2 hour buffer
+            # Look for appointments from today up to hours_before + 48 hours ahead
+            # This ensures we catch all upcoming appointments and send reminders 24h before
+            target_date_start = today
+            target_date_end = today + timedelta(days=3)  # Look 3 days ahead
             
             appointments_to_notify = []
             
@@ -4808,12 +4859,6 @@ class DatabaseManager:
                         first_name,
                         last_name,
                         phone
-                    ),
-                    doctors:doctor_firebase_uid(
-                        first_name,
-                        last_name,
-                        hospital_name,
-                        appointment_reminders_enabled
                     )
                 """).gte("follow_up_date", target_date_start.isoformat()
                 ).lte("follow_up_date", target_date_end.isoformat()
@@ -4823,11 +4868,17 @@ class DatabaseManager:
                 if visits_response.data:
                     for visit in visits_response.data:
                         patient = visit.get("patients", {})
-                        doctor = visit.get("doctors", {})
                         
                         # Skip if patient has no phone
                         if not patient.get("phone"):
                             continue
+                        
+                        # Get doctor info separately
+                        doctor_response = await self.supabase.table("doctors").select(
+                            "first_name, last_name, hospital_name, appointment_reminders_enabled"
+                        ).eq("firebase_uid", visit["doctor_firebase_uid"]).execute()
+                        
+                        doctor = doctor_response.data[0] if doctor_response.data else {}
                         
                         # Skip if doctor has reminders disabled
                         if doctor.get("appointment_reminders_enabled") == False:
@@ -4878,12 +4929,6 @@ class DatabaseManager:
                         first_name,
                         last_name,
                         phone
-                    ),
-                    doctors:doctor_firebase_uid(
-                        first_name,
-                        last_name,
-                        hospital_name,
-                        appointment_reminders_enabled
                     )
                 """).gte("appointment_date", target_date_start.isoformat()
                 ).lte("appointment_date", target_date_end.isoformat()
@@ -4893,11 +4938,17 @@ class DatabaseManager:
                 if appt_response.data:
                     for appt in appt_response.data:
                         patient = appt.get("patients", {})
-                        doctor = appt.get("doctors", {})
                         
                         # Skip if no patient linked or patient has no phone
                         if not patient or not patient.get("phone"):
                             continue
+                        
+                        # Get doctor info separately
+                        doctor_response = await self.supabase.table("doctors").select(
+                            "first_name, last_name, hospital_name, appointment_reminders_enabled"
+                        ).eq("firebase_uid", appt["doctor_firebase_uid"]).execute()
+                        
+                        doctor = doctor_response.data[0] if doctor_response.data else {}
                         
                         # Skip if doctor has reminders disabled
                         if doctor.get("appointment_reminders_enabled") == False:
