@@ -4028,14 +4028,12 @@ class DatabaseManager:
                 "status": "active",
                 "severity": case_data.get("severity", "moderate"),
                 "priority": case_data.get("priority", 2),
-                "expected_resolution_date": case_data.get("expected_resolution_date"),
-                "next_follow_up_date": case_data.get("next_follow_up_date"),
                 "tags": case_data.get("tags", []),
                 "notes": case_data.get("notes"),
                 "started_at": datetime.now().isoformat()
             }
             
-            result = await self.client.table("patient_cases").insert(insert_data).execute()
+            result = await self.supabase.table("patient_cases").insert(insert_data).execute()
             
             if result.data and len(result.data) > 0:
                 return result.data[0]
@@ -4051,7 +4049,7 @@ class DatabaseManager:
     ) -> Optional[Dict[str, Any]]:
         """Get a case by ID."""
         try:
-            result = await self.client.table("patient_cases")\
+            result = await self.supabase.table("patient_cases")\
                 .select("*")\
                 .eq("id", case_id)\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)\
@@ -4074,7 +4072,7 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Get all cases for a patient."""
         try:
-            query = self.client.table("patient_cases")\
+            query = self.supabase.table("patient_cases")\
                 .select("*")\
                 .eq("patient_id", patient_id)\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)
@@ -4102,8 +4100,8 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Get all active cases for a doctor."""
         try:
-            result = await self.client.table("patient_cases")\
-                .select("*, patients(id, full_name, phone_number)")\
+            result = await self.supabase.table("patient_cases")\
+                .select("*, patients(id, first_name, last_name, phone)")\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)\
                 .in_("status", ["active", "ongoing"])\
                 .order("last_visit_date", desc=True)\
@@ -4129,7 +4127,7 @@ class DatabaseManager:
             if not filtered_data:
                 return await self.get_case_by_id(case_id, doctor_firebase_uid)
             
-            result = await self.client.table("patient_cases")\
+            result = await self.supabase.table("patient_cases")\
                 .update(filtered_data)\
                 .eq("id", case_id)\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)\
@@ -4165,7 +4163,7 @@ class DatabaseManager:
             # Remove None values
             update_data = {k: v for k, v in update_data.items() if v is not None}
             
-            result = await self.client.table("patient_cases")\
+            result = await self.supabase.table("patient_cases")\
                 .update(update_data)\
                 .eq("id", case_id)\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)\
@@ -4196,7 +4194,7 @@ class DatabaseManager:
                 return True
             
             # Hard delete if no visits
-            result = await self.client.table("patient_cases")\
+            result = await self.supabase.table("patient_cases")\
                 .delete()\
                 .eq("id", case_id)\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)\
@@ -4220,7 +4218,7 @@ class DatabaseManager:
         """Add a photo to a case."""
         try:
             # Get next sequence number for this photo type
-            existing = await self.client.table("case_photos")\
+            existing = await self.supabase.table("case_photos")\
                 .select("sequence_number")\
                 .eq("case_id", case_id)\
                 .eq("photo_type", photo_data["photo_type"])\
@@ -4253,7 +4251,7 @@ class DatabaseManager:
                 "uploaded_at": datetime.now().isoformat()
             }
             
-            result = await self.client.table("case_photos").insert(insert_data).execute()
+            result = await self.supabase.table("case_photos").insert(insert_data).execute()
             
             if result.data and len(result.data) > 0:
                 return result.data[0]
@@ -4270,7 +4268,7 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Get all photos for a case, optionally filtered by type."""
         try:
-            query = self.client.table("case_photos")\
+            query = self.supabase.table("case_photos")\
                 .select("*")\
                 .eq("case_id", case_id)\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)
@@ -4295,7 +4293,7 @@ class DatabaseManager:
     ) -> Optional[Dict[str, Any]]:
         """Get a case photo by ID."""
         try:
-            result = await self.client.table("case_photos")\
+            result = await self.supabase.table("case_photos")\
                 .select("*")\
                 .eq("id", photo_id)\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)\
@@ -4320,7 +4318,7 @@ class DatabaseManager:
             if not filtered_data:
                 return await self.get_case_photo_by_id(photo_id, doctor_firebase_uid)
             
-            result = await self.client.table("case_photos")\
+            result = await self.supabase.table("case_photos")\
                 .update(filtered_data)\
                 .eq("id", photo_id)\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)\
@@ -4340,7 +4338,7 @@ class DatabaseManager:
     ) -> bool:
         """Delete a case photo."""
         try:
-            result = await self.client.table("case_photos")\
+            result = await self.supabase.table("case_photos")\
                 .delete()\
                 .eq("id", photo_id)\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)\
@@ -4365,7 +4363,7 @@ class DatabaseManager:
                 return False
             
             # Clear other primary flags for this type
-            await self.client.table("case_photos")\
+            await self.supabase.table("case_photos")\
                 .update({"is_primary": False})\
                 .eq("case_id", case_id)\
                 .eq("photo_type", photo["photo_type"])\
@@ -4373,7 +4371,7 @@ class DatabaseManager:
                 .execute()
             
             # Set this one as primary
-            await self.client.table("case_photos")\
+            await self.supabase.table("case_photos")\
                 .update({"is_primary": True})\
                 .eq("id", photo_id)\
                 .execute()
@@ -4424,53 +4422,50 @@ class DatabaseManager:
         doctor_firebase_uid: str,
         analysis_data: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
-        """Create a new AI analysis for a case."""
+        """Create a new AI analysis for a case.
+        
+        Stores analysis in raw_analysis (TEXT) and structured_data (JSONB) columns only.
+        Individual fields can be accessed via structured_data->'field_name' in queries.
+        """
         try:
+            # Get structured data for storage and extracting scores
+            structured_data = analysis_data.get("structured_data", {})
+            
+            # Extract scores from structured_data for case update
+            treatment_effectiveness_score = None
+            if isinstance(structured_data.get("treatment_effectiveness"), dict):
+                treatment_effectiveness_score = structured_data["treatment_effectiveness"].get("effectiveness_score")
+            
             insert_data = {
                 "case_id": case_id,
                 "patient_id": patient_id,
                 "doctor_firebase_uid": doctor_firebase_uid,
                 "analysis_type": analysis_data.get("analysis_type", "comprehensive"),
                 "model_used": analysis_data.get("model_used", "gemini-2.0-flash"),
-                "confidence_score": analysis_data.get("confidence_score"),
+                "confidence_score": structured_data.get("confidence_score"),
+                "raw_analysis": analysis_data.get("raw_analysis", ""),  # Required NOT NULL field - raw JSON text
+                "structured_data": structured_data,  # JSONB column for queryable access
                 "visits_analyzed": analysis_data.get("visits_analyzed", []),
                 "reports_analyzed": analysis_data.get("reports_analyzed", []),
                 "photos_analyzed": analysis_data.get("photos_analyzed", []),
-                "case_overview": analysis_data.get("case_overview"),
-                "presenting_complaint_summary": analysis_data.get("presenting_complaint_summary"),
-                "clinical_findings_summary": analysis_data.get("clinical_findings_summary"),
-                "diagnosis_assessment": analysis_data.get("diagnosis_assessment"),
-                "treatment_timeline": analysis_data.get("treatment_timeline"),
-                "treatment_effectiveness": analysis_data.get("treatment_effectiveness"),
-                "treatment_effectiveness_score": analysis_data.get("treatment_effectiveness_score"),
-                "medications_analysis": analysis_data.get("medications_analysis"),
-                "progress_assessment": analysis_data.get("progress_assessment"),
-                "improvement_indicators": analysis_data.get("improvement_indicators"),
-                "photo_comparison_analysis": analysis_data.get("photo_comparison_analysis"),
-                "visual_improvement_score": analysis_data.get("visual_improvement_score"),
-                "current_status_assessment": analysis_data.get("current_status_assessment"),
-                "recommended_next_steps": analysis_data.get("recommended_next_steps"),
-                "follow_up_recommendations": analysis_data.get("follow_up_recommendations"),
-                "red_flags": analysis_data.get("red_flags", []),
-                "patient_friendly_summary": analysis_data.get("patient_friendly_summary"),
                 "analysis_success": analysis_data.get("analysis_success", True),
                 "analysis_error": analysis_data.get("analysis_error"),
                 "analyzed_at": datetime.now().isoformat()
             }
             
-            result = await self.client.table("ai_case_analysis").insert(insert_data).execute()
+            result = await self.supabase.table("ai_case_analysis").insert(insert_data).execute()
             
             if result.data and len(result.data) > 0:
                 analysis = result.data[0]
                 
-                # Update case with latest analysis reference and AI summary
+                # Update case with latest analysis reference and AI summary from structured_data
                 update_case_data = {
                     "latest_ai_analysis_id": analysis["id"]
                 }
-                if analysis.get("treatment_effectiveness_score"):
-                    update_case_data["ai_treatment_effectiveness"] = analysis["treatment_effectiveness_score"]
-                if analysis.get("case_overview"):
-                    update_case_data["ai_summary"] = analysis["case_overview"]
+                if treatment_effectiveness_score is not None:
+                    update_case_data["ai_treatment_effectiveness"] = treatment_effectiveness_score
+                if structured_data.get("case_overview"):
+                    update_case_data["ai_summary"] = structured_data["case_overview"]
                 
                 await self.update_case(case_id, doctor_firebase_uid, update_case_data)
                 
@@ -4487,7 +4482,7 @@ class DatabaseManager:
     ) -> Optional[Dict[str, Any]]:
         """Get a case analysis by ID."""
         try:
-            result = await self.client.table("ai_case_analysis")\
+            result = await self.supabase.table("ai_case_analysis")\
                 .select("*")\
                 .eq("id", analysis_id)\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)\
@@ -4507,7 +4502,7 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Get all analyses for a case."""
         try:
-            result = await self.client.table("ai_case_analysis")\
+            result = await self.supabase.table("ai_case_analysis")\
                 .select("*")\
                 .eq("case_id", case_id)\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)\
@@ -4527,7 +4522,7 @@ class DatabaseManager:
     ) -> Optional[Dict[str, Any]]:
         """Get the most recent analysis for a case."""
         try:
-            result = await self.client.table("ai_case_analysis")\
+            result = await self.supabase.table("ai_case_analysis")\
                 .select("*")\
                 .eq("case_id", case_id)\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)\
@@ -4561,7 +4556,7 @@ class DatabaseManager:
                 return None
             
             # Update visit with case_id
-            result = await self.client.table("visits")\
+            result = await self.supabase.table("visits")\
                 .update({
                     "case_id": case_id,
                     "is_case_opener": is_case_opener
@@ -4590,7 +4585,7 @@ class DatabaseManager:
             visit = await self.get_visit_by_id(visit_id, doctor_firebase_uid)
             old_case_id = visit.get("case_id") if visit else None
             
-            result = await self.client.table("visits")\
+            result = await self.supabase.table("visits")\
                 .update({
                     "case_id": None,
                     "is_case_opener": False
@@ -4616,7 +4611,7 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Get all visits for a case."""
         try:
-            result = await self.client.table("visits")\
+            result = await self.supabase.table("visits")\
                 .select("*")\
                 .eq("case_id", case_id)\
                 .eq("doctor_firebase_uid", doctor_firebase_uid)\
@@ -4649,19 +4644,19 @@ class DatabaseManager:
             reports = []
             if visits:
                 visit_ids = [v["id"] for v in visits]
-                reports_result = await self.client.table("reports")\
+                reports_result = await self.supabase.table("reports")\
                     .select("*")\
                     .in_("visit_id", visit_ids)\
                     .eq("doctor_firebase_uid", doctor_firebase_uid)\
-                    .order("upload_date", desc=True)\
+                    .order("uploaded_at", desc=True)\
                     .execute()
                 reports = reports_result.data if reports_result.data else []
             
             # Get patient info
             patient = None
             if case.get("patient_id"):
-                patient_result = await self.client.table("patients")\
-                    .select("full_name, phone_number")\
+                patient_result = await self.supabase.table("patients")\
+                    .select("first_name, last_name, phone")\
                     .eq("id", case["patient_id"])\
                     .single()\
                     .execute()
@@ -4673,8 +4668,8 @@ class DatabaseManager:
                 "photos": photos,
                 "reports": reports,
                 "latest_analysis": latest_analysis,
-                "patient_name": patient.get("full_name") if patient else None,
-                "patient_phone": patient.get("phone_number") if patient else None
+                "patient_name": f"{patient.get('first_name', '')} {patient.get('last_name', '')}".strip() if patient else None,
+                "patient_phone": patient.get("phone") if patient else None
             }
         except Exception as e:
             print(f"Error getting case with details: {e}")
@@ -4769,3 +4764,303 @@ class DatabaseManager:
         except Exception as e:
             print(f"Error getting case timeline: {e}")
             return {"case_id": case_id, "events": [], "error": str(e)}
+
+    # ============================================================
+    # APPOINTMENT REMINDER METHODS
+    # ============================================================
+
+    async def get_appointments_needing_reminders(self, hours_before: int = 24) -> List[Dict[str, Any]]:
+        """
+        Get all appointments (from both visits.follow_up_date and appointments table) 
+        that need reminders sent within the specified hours window.
+        
+        Returns appointments where:
+        - The appointment is within the next `hours_before` hours
+        - No reminder has been sent yet for this appointment/reminder_type combo
+        - Patient has a phone number
+        - Doctor has reminders enabled
+        """
+        try:
+            from datetime import datetime, timedelta, date
+            
+            now = datetime.now(timezone.utc)
+            reminder_window_start = now
+            reminder_window_end = now + timedelta(hours=hours_before + 1)  # +1 hour buffer
+            
+            # Calculate the appointment date range to check
+            target_date_start = (now + timedelta(hours=hours_before - 1)).date()  # -1 hour buffer
+            target_date_end = (now + timedelta(hours=hours_before + 2)).date()    # +2 hour buffer
+            
+            appointments_to_notify = []
+            
+            # 1. Get follow-up appointments from visits table
+            try:
+                visits_response = await self.supabase.table("visits").select("""
+                    id,
+                    patient_id,
+                    doctor_firebase_uid,
+                    follow_up_date,
+                    follow_up_time,
+                    visit_type,
+                    chief_complaint,
+                    patients!inner(
+                        id,
+                        first_name,
+                        last_name,
+                        phone
+                    ),
+                    doctors:doctor_firebase_uid(
+                        first_name,
+                        last_name,
+                        hospital_name,
+                        appointment_reminders_enabled
+                    )
+                """).gte("follow_up_date", target_date_start.isoformat()
+                ).lte("follow_up_date", target_date_end.isoformat()
+                ).not_.is_("follow_up_date", "null"
+                ).execute()
+                
+                if visits_response.data:
+                    for visit in visits_response.data:
+                        patient = visit.get("patients", {})
+                        doctor = visit.get("doctors", {})
+                        
+                        # Skip if patient has no phone
+                        if not patient.get("phone"):
+                            continue
+                        
+                        # Skip if doctor has reminders disabled
+                        if doctor.get("appointment_reminders_enabled") == False:
+                            continue
+                        
+                        # Check if reminder already exists for this visit
+                        existing = await self.supabase.table("appointment_reminders").select("id").eq(
+                            "visit_id", visit["id"]
+                        ).eq("reminder_type", "24h_before").eq(
+                            "appointment_date", visit["follow_up_date"]
+                        ).execute()
+                        
+                        if existing.data:
+                            continue  # Already has a reminder scheduled
+                        
+                        appointments_to_notify.append({
+                            "source": "visit",
+                            "visit_id": visit["id"],
+                            "appointment_id": None,
+                            "patient_id": patient["id"],
+                            "doctor_firebase_uid": visit["doctor_firebase_uid"],
+                            "appointment_date": visit["follow_up_date"],
+                            "appointment_time": visit.get("follow_up_time"),
+                            "patient_name": f"{patient.get('first_name', '')} {patient.get('last_name', '')}".strip(),
+                            "patient_phone": patient["phone"],
+                            "doctor_name": f"Dr. {doctor.get('first_name', '')} {doctor.get('last_name', '')}".strip(),
+                            "hospital_name": doctor.get("hospital_name", ""),
+                            "visit_type": visit.get("visit_type"),
+                            "chief_complaint": visit.get("chief_complaint")
+                        })
+                        
+            except Exception as e:
+                print(f"Error getting visits for reminders: {e}")
+            
+            # 2. Get appointments from appointments table
+            try:
+                appt_response = await self.supabase.table("appointments").select("""
+                    id,
+                    patient_id,
+                    doctor_firebase_uid,
+                    appointment_date,
+                    appointment_time,
+                    appointment_type,
+                    status,
+                    notes,
+                    patients:patient_id(
+                        id,
+                        first_name,
+                        last_name,
+                        phone
+                    ),
+                    doctors:doctor_firebase_uid(
+                        first_name,
+                        last_name,
+                        hospital_name,
+                        appointment_reminders_enabled
+                    )
+                """).gte("appointment_date", target_date_start.isoformat()
+                ).lte("appointment_date", target_date_end.isoformat()
+                ).in_("status", ["scheduled", "confirmed"]
+                ).execute()
+                
+                if appt_response.data:
+                    for appt in appt_response.data:
+                        patient = appt.get("patients", {})
+                        doctor = appt.get("doctors", {})
+                        
+                        # Skip if no patient linked or patient has no phone
+                        if not patient or not patient.get("phone"):
+                            continue
+                        
+                        # Skip if doctor has reminders disabled
+                        if doctor.get("appointment_reminders_enabled") == False:
+                            continue
+                        
+                        # Check if reminder already exists for this appointment
+                        existing = await self.supabase.table("appointment_reminders").select("id").eq(
+                            "appointment_id", appt["id"]
+                        ).eq("reminder_type", "24h_before").eq(
+                            "appointment_date", appt["appointment_date"]
+                        ).execute()
+                        
+                        if existing.data:
+                            continue  # Already has a reminder scheduled
+                        
+                        appointments_to_notify.append({
+                            "source": "appointment",
+                            "visit_id": None,
+                            "appointment_id": appt["id"],
+                            "patient_id": patient["id"],
+                            "doctor_firebase_uid": appt["doctor_firebase_uid"],
+                            "appointment_date": appt["appointment_date"],
+                            "appointment_time": appt.get("appointment_time"),
+                            "patient_name": f"{patient.get('first_name', '')} {patient.get('last_name', '')}".strip(),
+                            "patient_phone": patient["phone"],
+                            "doctor_name": f"Dr. {doctor.get('first_name', '')} {doctor.get('last_name', '')}".strip(),
+                            "hospital_name": doctor.get("hospital_name", ""),
+                            "appointment_type": appt.get("appointment_type"),
+                            "notes": appt.get("notes")
+                        })
+                        
+            except Exception as e:
+                print(f"Error getting appointments for reminders: {e}")
+            
+            print(f"📅 Found {len(appointments_to_notify)} appointments needing reminders")
+            return appointments_to_notify
+            
+        except Exception as e:
+            print(f"Error in get_appointments_needing_reminders: {e}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return []
+
+    async def create_appointment_reminder(self, reminder_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Create a new appointment reminder record"""
+        try:
+            response = await self.supabase.table("appointment_reminders").insert(reminder_data).execute()
+            
+            if response.data:
+                print(f"✅ Created appointment reminder: {response.data[0]['id']}")
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error creating appointment reminder: {e}")
+            return None
+
+    async def update_appointment_reminder(self, reminder_id: int, update_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Update an appointment reminder record"""
+        try:
+            update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+            
+            response = await self.supabase.table("appointment_reminders").update(
+                update_data
+            ).eq("id", reminder_id).execute()
+            
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            print(f"Error updating appointment reminder: {e}")
+            return None
+
+    async def get_pending_reminders(self) -> List[Dict[str, Any]]:
+        """Get all pending reminders that are due to be sent"""
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            
+            response = await self.supabase.table("appointment_reminders").select("*").eq(
+                "status", "pending"
+            ).lte("scheduled_send_time", now).order("scheduled_send_time").execute()
+            
+            return response.data if response.data else []
+        except Exception as e:
+            print(f"Error getting pending reminders: {e}")
+            return []
+
+    async def get_reminder_history(self, doctor_firebase_uid: str, days: int = 7) -> List[Dict[str, Any]]:
+        """Get reminder history for a doctor"""
+        try:
+            from datetime import date, timedelta
+            start_date = (date.today() - timedelta(days=days)).isoformat()
+            
+            response = await self.supabase.table("appointment_reminders").select("*").eq(
+                "doctor_firebase_uid", doctor_firebase_uid
+            ).gte("created_at", start_date).order("created_at", desc=True).execute()
+            
+            return response.data if response.data else []
+        except Exception as e:
+            print(f"Error getting reminder history: {e}")
+            return []
+
+    async def get_reminder_stats(self, doctor_firebase_uid: str) -> Dict[str, int]:
+        """Get reminder statistics for a doctor"""
+        try:
+            from datetime import date, timedelta
+            today = date.today()
+            week_start = (today - timedelta(days=7)).isoformat()
+            month_start = (today - timedelta(days=30)).isoformat()
+            
+            # Get weekly stats
+            weekly_response = await self.supabase.table("appointment_reminders").select(
+                "status", count="exact"
+            ).eq("doctor_firebase_uid", doctor_firebase_uid).gte("created_at", week_start).execute()
+            
+            # Get monthly stats by status
+            sent_response = await self.supabase.table("appointment_reminders").select(
+                "id", count="exact"
+            ).eq("doctor_firebase_uid", doctor_firebase_uid).eq("status", "sent").gte("created_at", month_start).execute()
+            
+            failed_response = await self.supabase.table("appointment_reminders").select(
+                "id", count="exact"
+            ).eq("doctor_firebase_uid", doctor_firebase_uid).eq("status", "failed").gte("created_at", month_start).execute()
+            
+            pending_response = await self.supabase.table("appointment_reminders").select(
+                "id", count="exact"
+            ).eq("doctor_firebase_uid", doctor_firebase_uid).eq("status", "pending").execute()
+            
+            return {
+                "weekly_total": len(weekly_response.data) if weekly_response.data else 0,
+                "monthly_sent": sent_response.count if sent_response.count else 0,
+                "monthly_failed": failed_response.count if failed_response.count else 0,
+                "pending": pending_response.count if pending_response.count else 0
+            }
+        except Exception as e:
+            print(f"Error getting reminder stats: {e}")
+            return {"weekly_total": 0, "monthly_sent": 0, "monthly_failed": 0, "pending": 0}
+
+    async def update_doctor_reminder_settings(self, doctor_firebase_uid: str, enabled: bool, hours_before: int = 24) -> bool:
+        """Update doctor's reminder settings"""
+        try:
+            response = await self.supabase.table("doctors").update({
+                "appointment_reminders_enabled": enabled,
+                "reminder_hours_before": hours_before,
+                "updated_at": datetime.now(timezone.utc).isoformat()
+            }).eq("firebase_uid", doctor_firebase_uid).execute()
+            
+            return bool(response.data)
+        except Exception as e:
+            print(f"Error updating doctor reminder settings: {e}")
+            return False
+
+    async def get_doctor_reminder_settings(self, doctor_firebase_uid: str) -> Dict[str, Any]:
+        """Get doctor's reminder settings"""
+        try:
+            response = await self.supabase.table("doctors").select(
+                "appointment_reminders_enabled, reminder_hours_before"
+            ).eq("firebase_uid", doctor_firebase_uid).execute()
+            
+            if response.data:
+                return {
+                    "enabled": response.data[0].get("appointment_reminders_enabled", True),
+                    "hours_before": response.data[0].get("reminder_hours_before", 24)
+                }
+            return {"enabled": True, "hours_before": 24}
+        except Exception as e:
+            print(f"Error getting doctor reminder settings: {e}")
+            return {"enabled": True, "hours_before": 24}

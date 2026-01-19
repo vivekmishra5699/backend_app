@@ -2909,6 +2909,9 @@ Include a dedicated "TREND ANALYSIS" section in your response.
                     "analysis": None
                 }
             
+            # Store raw JSON response
+            raw_json_response = response.text
+            
             # Parse JSON response
             try:
                 analysis_result = json.loads(response.text)
@@ -2916,43 +2919,20 @@ Include a dedicated "TREND ANALYSIS" section in your response.
                 return {
                     "success": False,
                     "error": "Failed to parse AI response",
+                    "raw_analysis": raw_json_response,  # Store raw even if parsing fails
                     "analysis": None
                 }
             
-            # Extract key scores
-            treatment_effectiveness_score = None
-            if isinstance(analysis_result.get("treatment_effectiveness"), dict):
-                treatment_effectiveness_score = analysis_result["treatment_effectiveness"].get("effectiveness_score")
-            
-            visual_improvement_score = None
-            if isinstance(analysis_result.get("photo_comparison_analysis"), dict):
-                visual_improvement_score = analysis_result["photo_comparison_analysis"].get("visual_improvement_score")
-            
+            # Return simplified structure - all fields are in structured_data
             return {
                 "success": True,
+                "raw_analysis": raw_json_response,  # Raw JSON string for raw_analysis column
+                "structured_data": analysis_result,  # Parsed JSON for structured_data JSONB column
                 "analysis_type": analysis_type,
                 "model_used": self.model_name,
-                "confidence_score": analysis_result.get("confidence_score"),
                 "visits_analyzed": [v.get("id") for v in visits],
                 "reports_analyzed": [r.get("id") for r in reports],
                 "photos_analyzed": [p.get("id") for p in photos],
-                "case_overview": analysis_result.get("case_overview"),
-                "presenting_complaint_summary": analysis_result.get("presenting_complaint_summary"),
-                "clinical_findings_summary": analysis_result.get("clinical_findings_summary"),
-                "diagnosis_assessment": json.dumps(analysis_result.get("diagnosis_assessment")) if analysis_result.get("diagnosis_assessment") else None,
-                "treatment_timeline": analysis_result.get("treatment_timeline"),
-                "treatment_effectiveness": json.dumps(analysis_result.get("treatment_effectiveness")) if analysis_result.get("treatment_effectiveness") else None,
-                "treatment_effectiveness_score": treatment_effectiveness_score,
-                "medications_analysis": analysis_result.get("medications_analysis"),
-                "progress_assessment": json.dumps(analysis_result.get("progress_assessment")) if analysis_result.get("progress_assessment") else None,
-                "improvement_indicators": analysis_result.get("improvement_indicators"),
-                "photo_comparison_analysis": json.dumps(analysis_result.get("photo_comparison_analysis")) if analysis_result.get("photo_comparison_analysis") else None,
-                "visual_improvement_score": visual_improvement_score,
-                "current_status_assessment": analysis_result.get("current_status_assessment"),
-                "recommended_next_steps": analysis_result.get("recommended_next_steps"),
-                "follow_up_recommendations": json.dumps(analysis_result.get("follow_up_recommendations")) if analysis_result.get("follow_up_recommendations") else None,
-                "red_flags": analysis_result.get("red_flags", []),
-                "patient_friendly_summary": analysis_result.get("patient_friendly_summary"),
                 "analysis_success": True
             }
             

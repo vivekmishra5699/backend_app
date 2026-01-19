@@ -48,6 +48,9 @@ from pdf_generator import PatientProfilePDFGenerator  # New import for PDF gener
 from ai_analysis_service import AIAnalysisService
 from ai_analysis_processor import AIAnalysisProcessor
 
+# Import Appointment Reminder Service
+from appointment_reminder_service import AppointmentReminderService
+
 # Load environment variables
 load_dotenv()
 
@@ -58,8 +61,10 @@ firebase_manager: Optional[AsyncFirebaseManager] = None
 whatsapp_service: Optional[WhatsAppService] = None
 ai_analysis_service: Optional[AIAnalysisService] = None
 ai_processor: Optional[AIAnalysisProcessor] = None
+appointment_reminder_service: Optional[AppointmentReminderService] = None
 background_task = None
 cleanup_task = None
+reminder_task = None
 
 # In-memory set to track in-progress analyses (simple deduplication)
 _analyses_in_progress: set = set()
@@ -96,7 +101,7 @@ async def periodic_queue_cleanup(db_instance, interval_hours: int = 1):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    global supabase, db, firebase_manager, whatsapp_service, ai_analysis_service, ai_processor, background_task, cleanup_task
+    global supabase, db, firebase_manager, whatsapp_service, ai_analysis_service, ai_processor, appointment_reminder_service, background_task, cleanup_task, reminder_task
     
     print("🚀 Starting application...")
     
@@ -148,6 +153,10 @@ async def lifespan(app: FastAPI):
         ai_processor = AIAnalysisProcessor(db, ai_analysis_service)
         print("AI Analysis processor initialized successfully")
         
+        # Initialize Appointment Reminder Service
+        appointment_reminder_service = AppointmentReminderService(db, whatsapp_service)
+        print("Appointment Reminder service initialized successfully")
+        
     except Exception as e:
         print(f"ERROR initializing Supabase: {e}")
         raise
@@ -162,6 +171,10 @@ async def lifespan(app: FastAPI):
         # Start periodic queue cleanup task (runs every hour)
         cleanup_task = asyncio.create_task(periodic_queue_cleanup(db, interval_hours=1))
         print("✅ Periodic queue cleanup task started (runs every hour)")
+        
+        # Start appointment reminder service
+        reminder_task = asyncio.create_task(appointment_reminder_service.start())
+        print("✅ Appointment reminder service started (checks every 15 minutes)")
         
         # Run initial cleanup on startup
         print("🧹 Running initial queue cleanup on startup...")
@@ -195,6 +208,18 @@ async def lifespan(app: FastAPI):
             except asyncio.CancelledError:
                 pass
         print("✅ Periodic cleanup task stopped")
+        
+        # Stop appointment reminder service
+        print("🛑 Stopping appointment reminder service...")
+        if appointment_reminder_service:
+            appointment_reminder_service.stop()
+        if reminder_task:
+            reminder_task.cancel()
+            try:
+                await reminder_task
+            except asyncio.CancelledError:
+                pass
+        print("✅ Appointment reminder service stopped")
         
         # Get cache stats before shutdown
         print("📊 Final cache statistics:")
@@ -337,6 +362,32 @@ Empirical prescriptions include a disclaimer that the prescription may be modifi
 - Acknowledge alerts with optional notes
 - Patient-specific and visit-specific alert views
 - Alert history tracking
+"""
+        },
+        {
+            "name": "Appointment Reminders",
+            "description": """Automatic appointment reminder system via WhatsApp.
+
+### Features:
+- **Automatic Reminders**: Sends WhatsApp reminders 24 hours before appointments
+- **Configurable Timing**: Customize how many hours before to send reminders (1-72 hours)
+- **Per-Doctor Settings**: Each doctor can enable/disable and configure their reminders
+- **Retry Logic**: Failed reminders are automatically retried up to 3 times
+- **History Tracking**: View sent reminders and their delivery status
+
+### Reminder Sources:
+- Follow-up appointments from visits
+- Scheduled appointments from the appointments calendar
+
+### How It Works:
+1. The service runs in the background, checking every 15 minutes
+2. It finds appointments scheduled within the next 24 hours
+3. For each appointment, it sends a WhatsApp message to the patient
+4. Delivery status is tracked and failed sends are retried
+
+### Manual Overrides:
+- Use `/reminders/send-now/{visit_id}` to immediately send a reminder
+- Include custom messages for special instructions
 """
         }
     ]
@@ -1534,39 +1585,28 @@ class CaseAnalysisRequest(BaseModel):
     include_reports: bool = Field(default=True, description="Include reports in analysis")
     from_date: Optional[str] = Field(default=None, description="Analysis start date (YYYY-MM-DD)")
     to_date: Optional[str] = Field(default=None, description="Analysis end date (YYYY-MM-DD)")
+    force_reanalyze: bool = Field(default=False, description="Force new analysis even if one exists")
 
 class CaseAnalysisResponse(BaseModel):
-    """Case AI analysis response"""
+    """Case AI analysis response - data stored in raw_analysis and structured_data"""
     id: int
     case_id: int
     patient_id: int
     analysis_type: str
-    model_used: str
+    model_used: Optional[str] = None
     confidence_score: Optional[float] = None
-    visits_analyzed: List[int] = Field(default_factory=list)
-    reports_analyzed: List[int] = Field(default_factory=list)
-    photos_analyzed: List[int] = Field(default_factory=list)
-    case_overview: Optional[str] = None
-    presenting_complaint_summary: Optional[str] = None
-    clinical_findings_summary: Optional[str] = None
-    diagnosis_assessment: Optional[str] = None
-    treatment_timeline: Optional[List[dict]] = None
-    treatment_effectiveness: Optional[str] = None
-    treatment_effectiveness_score: Optional[float] = None
-    medications_analysis: Optional[dict] = None
-    progress_assessment: Optional[str] = None
-    improvement_indicators: Optional[List[dict]] = None
-    photo_comparison_analysis: Optional[str] = None
-    visual_improvement_score: Optional[float] = None
-    current_status_assessment: Optional[str] = None
-    recommended_next_steps: Optional[List[dict]] = None
-    follow_up_recommendations: Optional[str] = None
-    red_flags: List[dict] = Field(default_factory=list)
-    patient_friendly_summary: Optional[str] = None
-    analysis_success: bool = True
+    visits_analyzed: Optional[List[int]] = Field(default_factory=list)
+    reports_analyzed: Optional[List[int]] = Field(default_factory=list)
+    photos_analyzed: Optional[List[int]] = Field(default_factory=list)
+    raw_analysis: Optional[str] = None  # Raw JSON text from AI
+    structured_data: Optional[dict] = None  # Parsed JSON with all analysis fields
+    analysis_success: Optional[bool] = True
     analysis_error: Optional[str] = None
-    analyzed_at: str
-    created_at: str
+    analyzed_at: Optional[str] = None
+    created_at: Optional[str] = None
+    
+    class Config:
+        from_attributes = True
 
 class CaseWithDetails(CaseResponse):
     """Extended case response with visits, photos, reports, and analysis"""
@@ -5642,26 +5682,10 @@ async def get_linked_visits(visit_id: int, current_doctor = Depends(get_current_
     - To get visits for a case: GET /cases/{case_id}/visits
     - To get case details with visits: GET /cases/{case_id}/details
     """
-    # Check if visit has a case_id and redirect
-    visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
-    if not visit:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Visit not found")
-    
-    if visit.get("case_id"):
-        return {
-            "message": "This endpoint is deprecated. Visit is part of a case.",
-            "case_id": visit["case_id"],
-            "redirect_to": f"/cases/{visit['case_id']}/visits",
-            "deprecated": True
-        }
-    
-    return {
-        "message": "This endpoint is deprecated. Use case-based endpoints instead.",
-        "current_visit": {"id": visit["id"], "visit_date": visit["visit_date"]},
-        "parent_visit": None,
-        "child_visits": [],
-        "deprecated": True
-    }
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="This endpoint is deprecated. Use case-based endpoints instead: GET /cases/{case_id}/details or GET /patients/{patient_id}/cases"
+    )
 
 @app.post("/visits/{visit_id}/link-to-visit", response_model=dict, deprecated=True)
 async def link_visit_to_parent(
@@ -9975,6 +9999,263 @@ Best regards,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to send appointment reminder: {str(e)}"
         )
+
+
+# ============================================================
+# AUTOMATIC APPOINTMENT REMINDER ENDPOINTS
+# ============================================================
+
+class ReminderSettingsUpdate(BaseModel):
+    """Model for updating reminder settings"""
+    enabled: bool = True
+    hours_before: int = Field(default=24, ge=1, le=72, description="Hours before appointment to send reminder")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "enabled": True,
+                "hours_before": 24
+            }
+        }
+
+class ReminderHistoryItem(BaseModel):
+    """Model for reminder history item"""
+    id: int
+    patient_name: str
+    patient_phone: str
+    appointment_date: str
+    appointment_time: Optional[str] = None
+    reminder_type: str
+    status: str
+    sent_at: Optional[str] = None
+    error_message: Optional[str] = None
+    created_at: str
+
+class ReminderStats(BaseModel):
+    """Model for reminder statistics"""
+    weekly_total: int
+    monthly_sent: int
+    monthly_failed: int
+    pending: int
+
+class ReminderServiceStatus(BaseModel):
+    """Model for reminder service status"""
+    running: bool
+    check_interval_minutes: int
+    default_hours_before: int
+    pending_reminders: int
+    sent_today: int
+    failed_today: int
+
+
+@app.get("/reminders/settings", response_model=dict, tags=["Appointment Reminders"])
+async def get_reminder_settings(current_doctor = Depends(get_current_doctor)):
+    """
+    Get the current automatic reminder settings for the doctor.
+    
+    Returns whether automatic reminders are enabled and how many hours
+    before appointments the reminders should be sent.
+    """
+    try:
+        settings = await db.get_doctor_reminder_settings(current_doctor["firebase_uid"])
+        return {
+            "doctor_firebase_uid": current_doctor["firebase_uid"],
+            "enabled": settings.get("enabled", True),
+            "hours_before": settings.get("hours_before", 24),
+            "description": "Automatic WhatsApp reminders will be sent to patients before their appointments"
+        }
+    except Exception as e:
+        print(f"Error getting reminder settings: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get reminder settings: {str(e)}"
+        )
+
+
+@app.put("/reminders/settings", response_model=dict, tags=["Appointment Reminders"])
+async def update_reminder_settings(
+    settings: ReminderSettingsUpdate,
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Update the automatic reminder settings for the doctor.
+    
+    - **enabled**: Whether to send automatic reminders
+    - **hours_before**: How many hours before the appointment to send the reminder (1-72)
+    """
+    try:
+        success = await db.update_doctor_reminder_settings(
+            current_doctor["firebase_uid"],
+            settings.enabled,
+            settings.hours_before
+        )
+        
+        if success:
+            return {
+                "message": "Reminder settings updated successfully",
+                "enabled": settings.enabled,
+                "hours_before": settings.hours_before
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update reminder settings"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error updating reminder settings: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update reminder settings: {str(e)}"
+        )
+
+
+@app.get("/reminders/history", response_model=List[ReminderHistoryItem], tags=["Appointment Reminders"])
+async def get_reminder_history(
+    days: int = Query(default=7, ge=1, le=30, description="Number of days of history to retrieve"),
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Get the history of sent appointment reminders.
+    
+    Returns a list of reminders sent in the last N days (default 7, max 30).
+    """
+    try:
+        history = await db.get_reminder_history(current_doctor["firebase_uid"], days)
+        
+        return [
+            ReminderHistoryItem(
+                id=item["id"],
+                patient_name=item["patient_name"],
+                patient_phone=item["patient_phone"],
+                appointment_date=item["appointment_date"],
+                appointment_time=item.get("appointment_time"),
+                reminder_type=item["reminder_type"],
+                status=item["status"],
+                sent_at=item.get("sent_at"),
+                error_message=item.get("error_message"),
+                created_at=item["created_at"]
+            )
+            for item in history
+        ]
+    except Exception as e:
+        print(f"Error getting reminder history: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get reminder history: {str(e)}"
+        )
+
+
+@app.get("/reminders/stats", response_model=ReminderStats, tags=["Appointment Reminders"])
+async def get_reminder_stats(current_doctor = Depends(get_current_doctor)):
+    """
+    Get statistics about appointment reminders.
+    
+    Returns counts of sent, failed, and pending reminders.
+    """
+    try:
+        stats = await db.get_reminder_stats(current_doctor["firebase_uid"])
+        return ReminderStats(**stats)
+    except Exception as e:
+        print(f"Error getting reminder stats: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get reminder stats: {str(e)}"
+        )
+
+
+@app.get("/reminders/service-status", response_model=ReminderServiceStatus, tags=["Appointment Reminders"])
+async def get_reminder_service_status(current_doctor = Depends(get_current_doctor)):
+    """
+    Get the current status of the automatic reminder service.
+    
+    Shows whether the service is running and basic statistics.
+    """
+    try:
+        if appointment_reminder_service:
+            status_data = await appointment_reminder_service.get_service_status()
+            return ReminderServiceStatus(**status_data)
+        else:
+            return ReminderServiceStatus(
+                running=False,
+                check_interval_minutes=15,
+                default_hours_before=24,
+                pending_reminders=0,
+                sent_today=0,
+                failed_today=0
+            )
+    except Exception as e:
+        print(f"Error getting service status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get service status: {str(e)}"
+        )
+
+
+@app.post("/reminders/send-now/{visit_id}", response_model=dict, tags=["Appointment Reminders"])
+async def send_reminder_now(
+    visit_id: int,
+    custom_message: Optional[str] = Body(default=None, embed=True),
+    current_doctor = Depends(get_current_doctor)
+):
+    """
+    Immediately send a reminder for a specific appointment.
+    
+    This bypasses the automatic scheduling and sends a reminder right away.
+    Useful for urgent reminders or re-sending failed reminders.
+    
+    - **visit_id**: The ID of the visit with the follow-up appointment
+    - **custom_message**: Optional custom message to send instead of the default
+    """
+    try:
+        # Verify the visit belongs to this doctor
+        visit = await db.get_visit_by_id(visit_id, current_doctor["firebase_uid"])
+        if not visit:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Visit not found"
+            )
+        
+        if not visit.get("follow_up_date"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This visit does not have a follow-up appointment scheduled"
+            )
+        
+        if appointment_reminder_service:
+            result = await appointment_reminder_service.send_immediate_reminder(
+                visit_id=visit_id,
+                custom_message=custom_message
+            )
+            
+            if result.get("success"):
+                return {
+                    "message": "Reminder sent successfully",
+                    "reminder_id": result.get("reminder_id"),
+                    "patient_name": result.get("patient_name"),
+                    "appointment_date": result.get("appointment_date")
+                }
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=result.get("error", "Failed to send reminder")
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Reminder service is not available"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error sending immediate reminder: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to send reminder: {str(e)}"
+        )
+
 
 @app.put("/visits/{visit_id}/billing", response_model=dict, tags=["Billing", "Visits"])
 async def update_visit_billing(
@@ -14709,6 +14990,7 @@ async def analyze_case(
 ):
     """
     Trigger AI analysis for a case. Analyzes all visits, reports, and photos.
+    If the case already has an analysis, returns the existing one unless force_reanalyze is set.
     """
     try:
         if not ai_analysis_service:
@@ -14716,6 +14998,13 @@ async def analyze_case(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="AI analysis service is not available"
             )
+        
+        # Check if case already has an analysis (unless force_reanalyze is requested)
+        if not getattr(request, 'force_reanalyze', False):
+            existing_analysis = await db.get_latest_case_analysis(case_id, current_doctor["firebase_uid"])
+            if existing_analysis and existing_analysis.get("analysis_success"):
+                print(f"Returning existing analysis for case {case_id}")
+                return existing_analysis
         
         # Get case with all related data
         case_details = await db.get_case_with_details(case_id, current_doctor["firebase_uid"])
