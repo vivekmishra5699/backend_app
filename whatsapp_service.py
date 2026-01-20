@@ -384,6 +384,23 @@ Thank you!"""
                 "error": str(e)
             }
 
+    async def send_empirical_prescription(self, patient_name: str, doctor_name: str, phone_number: str, 
+                                          pdf_url: str, visit_date: str, custom_message: str = "") -> Dict[str, Any]:
+        """Send empirical prescription via WhatsApp with disclaimer about potential changes"""
+        try:
+            message = self._create_empirical_prescription_message(
+                patient_name, doctor_name, pdf_url, visit_date, custom_message
+            )
+            
+            return await self.send_message(phone_number, message)
+            
+        except Exception as e:
+            print(f"Error sending empirical prescription via WhatsApp: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
     def _create_visit_report_message(self, patient_name: str, doctor_name: str, 
                                    report_url: str, visit_date: str, custom_message: str = "") -> str:
         """Create a formatted visit report message"""
@@ -460,6 +477,61 @@ Hello {patient_name},
         base_message += """
 
 🔒 These handwritten notes are confidential and for your personal medical records.
+
+Thank you for visiting our clinic!"""
+        
+        return base_message
+
+    def _create_empirical_prescription_message(self, patient_name: str, doctor_name: str, 
+                                               pdf_url: str, visit_date: str, custom_message: str = "") -> str:
+        """Create a formatted empirical prescription message with disclaimer"""
+        
+        # Format the visit date
+        try:
+            from datetime import datetime
+            date_obj = datetime.strptime(visit_date, "%Y-%m-%d")
+            formatted_date = date_obj.strftime("%B %d, %Y")
+        except Exception:
+            formatted_date = visit_date
+        
+        base_message = f"""⚕️ *EMPIRICAL PRESCRIPTION*
+
+Hello {patient_name},
+
+{doctor_name} has provided you with an *empirical prescription* based on your consultation on {formatted_date}.
+
+📄 *Download your prescription:*
+{pdf_url}
+
+⚠️ *IMPORTANT NOTICE:*
+━━━━━━━━━━━━━━━━━━━━━━━━
+This is an *initial/empirical prescription* based on clinical assessment.
+
+*This prescription may be MODIFIED based on:*
+• Laboratory test results
+• Diagnostic imaging reports
+• Further clinical investigation
+• Follow-up examination findings
+
+*Please complete the recommended tests and return for follow-up.*
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+📱 *Prescription Details:*
+• Visit Date: {formatted_date}
+• Doctor: {doctor_name}
+• Type: Empirical (Initial) Prescription
+• Issued on: {datetime.now().strftime("%B %d, %Y at %I:%M %p")}"""
+
+        if custom_message.strip():
+            base_message += f"""
+
+💬 *Doctor's Message:*
+{custom_message.strip()}"""
+
+        base_message += """
+
+🔒 This prescription is confidential and for your personal medical use only.
+❌ Do not discontinue or modify medications without consulting your doctor.
 
 Thank you for visiting our clinic!"""
         
