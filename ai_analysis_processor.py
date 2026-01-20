@@ -3,6 +3,7 @@ AI Analysis Background Processor
 
 This service processes queued AI analysis tasks in the background.
 It continuously checks for pending analyses and processes them.
+Now with integrated Clinical Alert generation from AI findings.
 """
 
 import asyncio
@@ -11,10 +12,17 @@ import httpx
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import os
+import logging
 from dotenv import load_dotenv
+from async_file_downloader import file_downloader
+
+# Import alert service for critical findings
+from alert_service import ClinicalAlertService, get_alert_service
 
 # Load environment variables
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 class AIAnalysisProcessor:
     def __init__(self, db_manager, ai_service):
@@ -23,9 +31,21 @@ class AIAnalysisProcessor:
         self.ai_service = ai_service
         self.is_running = False
         self.process_interval = 10  # Check every 10 seconds
-        self.max_concurrent = 10  # Process max 10 analyses concurrently
+        self.max_concurrent = 3  # Reduced to 3 to avoid rate limits
+        self.delay_between_analyses = 2  # 2 second delay between each analysis
+        self.file_downloader = file_downloader  # Use global async downloader
         
-        print("🔄 AI Analysis Processor initialized")
+        # Initialize alert service for critical findings detection
+        self.alert_service: Optional[ClinicalAlertService] = None
+        
+        logger.info("🔄 AI Analysis Processor initialized")
+        logger.info(f"   Max concurrent: {self.max_concurrent}")
+        logger.info(f"   Delay between analyses: {self.delay_between_analyses}s")
+    
+    def _init_alert_service(self):
+        """Initialize the alert service lazily (needs supabase client)"""
+        if self.alert_service is None:
+            self.alert_service = get_alert_service(self.db.supabase)
     
     async def start_processing(self):
         """Start the background processing loop"""
@@ -61,15 +81,20 @@ class AIAnalysisProcessor:
             
             print(f"📋 Found {len(queue_items)} pending AI analyses to process")
             
-            # Process analyses concurrently
-            tasks = []
-            for queue_item in queue_items:
-                task = asyncio.create_task(self.process_single_analysis(queue_item))
-                tasks.append(task)
+            # Process analyses concurrently using asyncio.gather
+            print(f"🚀 Processing {len(queue_items)} analyses concurrently...")
+            tasks = [self.process_single_analysis(item) for item in queue_items]
             
-            # Wait for all tasks to complete
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+            # Use return_exceptions=True to ensure all tasks complete even if one fails
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Check for any exceptions returned by gather
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    item_id = queue_items[i].get('id', 'unknown')
+                    print(f"❌ Exception in concurrent task for item {item_id}: {result}")
+            
+            print(f"✅ Batch processing completed")
                 
         except Exception as e:
             print(f"❌ Error processing pending analyses: {e}")
@@ -80,16 +105,13 @@ class AIAnalysisProcessor:
         try:
             # Use a direct query to get pending analyses
             # This is a simplified version - in production you might want to batch by doctor
-            response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.db.supabase.table("ai_analysis_queue")
-                    .select("*")
-                    .eq("status", "pending")
-                    .order("priority", desc=True)
-                    .order("queued_at")
-                    .limit(limit)
+            response = await self.db.supabase.table("ai_analysis_queue") \
+                    .select("*") \
+                    .eq("status", "pending") \
+                    .order("priority", desc=True) \
+                    .order("queued_at") \
+                    .limit(limit) \
                     .execute()
-            )
             
             return response.data if response.data else []
             
@@ -153,7 +175,11 @@ class AIAnalysisProcessor:
             processing_time = (datetime.now() - start_time).total_seconds() * 1000
             
             if analysis_result["success"]:
-                # Store analysis results
+                # Get structured data (either from JSON mode or parsed)
+                structured_analysis = analysis_result["analysis"].get("structured_analysis", {})
+                structured_data = analysis_result["analysis"].get("structured_data", structured_analysis)
+                
+                # Store analysis results with enhanced visit-contextual fields
                 analysis_data = {
                     "report_id": report_id,
                     "visit_id": visit_id,
@@ -161,15 +187,23 @@ class AIAnalysisProcessor:
                     "doctor_firebase_uid": doctor_firebase_uid,
                     "analysis_type": "document_analysis",
                     "model_used": analysis_result["model_used"],
-                    "confidence_score": analysis_result["analysis"]["confidence_score"],
-                    "raw_analysis": analysis_result["analysis"]["raw_analysis"],
-                    "document_summary": analysis_result["analysis"]["structured_analysis"].get("document_summary"),
-                    "clinical_significance": analysis_result["analysis"]["structured_analysis"].get("clinical_significance"),
-                    "correlation_with_patient": analysis_result["analysis"]["structured_analysis"].get("correlation_with_patient"),
-                    "actionable_insights": analysis_result["analysis"]["structured_analysis"].get("actionable_insights"),
-                    "patient_communication": analysis_result["analysis"]["structured_analysis"].get("patient_communication"),
-                    "clinical_notes": analysis_result["analysis"]["structured_analysis"].get("clinical_notes"),
-                    "key_findings": analysis_result["analysis"]["key_findings"],
+                    "confidence_score": analysis_result["analysis"].get("confidence_score", 0.7),
+                    "raw_analysis": analysis_result["analysis"].get("raw_analysis", ""),
+                    # NEW: Store structured JSON data directly
+                    "structured_data": structured_data if structured_data else None,
+                    # Enhanced visit-contextual fields (for backward compatibility)
+                    "clinical_correlation": structured_analysis.get("clinical_correlation"),
+                    "detailed_findings": structured_analysis.get("detailed_findings") or structured_analysis.get("findings"),
+                    "critical_findings": structured_analysis.get("critical_findings"),
+                    "treatment_evaluation": structured_analysis.get("treatment_evaluation"),
+                    # Original fields (keeping for backward compatibility)
+                    "document_summary": structured_analysis.get("document_summary"),
+                    "clinical_significance": structured_analysis.get("clinical_significance"),
+                    "correlation_with_patient": structured_analysis.get("correlation_with_patient"),
+                    "actionable_insights": structured_analysis.get("actionable_insights"),
+                    "patient_communication": structured_analysis.get("patient_communication"),
+                    "clinical_notes": structured_analysis.get("clinical_notes"),
+                    "key_findings": analysis_result["analysis"].get("key_findings", []),
                     "analysis_success": True,
                     "analysis_error": None,
                     "processing_time_ms": int(processing_time),
@@ -179,9 +213,27 @@ class AIAnalysisProcessor:
                 
                 created_analysis = await self.db.create_ai_analysis(analysis_data)
                 if created_analysis:
-                    print(f"✅ AI analysis completed for report {report_id} (Queue ID: {queue_id})")
-                    print(f"   Processing time: {processing_time:.0f}ms")
-                    print(f"   Confidence: {analysis_result['analysis']['confidence_score']:.2f}")
+                    logger.info(f"✅ AI analysis completed for report {report_id} (Queue ID: {queue_id})")
+                    logger.info(f"   Processing time: {processing_time:.0f}ms")
+                    logger.info(f"   Confidence: {analysis_result['analysis']['confidence_score']:.2f}")
+                    logger.info(f"   Parsing method: {analysis_result['analysis'].get('parsing_method', 'unknown')}")
+                    
+                    # GENERATE CLINICAL ALERTS from critical findings
+                    try:
+                        self._init_alert_service()
+                        if self.alert_service and structured_data:
+                            alerts_created = await self.alert_service.process_analysis_for_alerts(
+                                analysis_id=str(created_analysis.get("id")),
+                                analysis_data=structured_data,
+                                patient_id=str(patient_id),
+                                doctor_firebase_uid=doctor_firebase_uid,
+                                visit_id=str(visit_id)
+                            )
+                            if alerts_created:
+                                logger.info(f"   🚨 Created {len(alerts_created)} clinical alerts")
+                    except Exception as alert_error:
+                        logger.warning(f"   ⚠️ Alert generation failed (non-critical): {alert_error}")
+                    
                     await self.db.update_ai_analysis_queue_status(queue_id, "completed")
                 else:
                     error_msg = "Failed to save analysis results to database"
@@ -219,15 +271,21 @@ class AIAnalysisProcessor:
             await self.db.update_ai_analysis_queue_status(queue_id, "failed", error_msg)
     
     async def download_report_file(self, file_url: str) -> Optional[bytes]:
-        """Download a report file from the given URL"""
+        """Download a report file from the given URL using async non-blocking download"""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(file_url)
-                if response.status_code == 200:
-                    return response.content
-                else:
-                    print(f"❌ Failed to download file: HTTP {response.status_code}")
-                    return None
+            # Use the async file downloader instead of httpx directly
+            # This prevents blocking during large file downloads
+            file_content = await self.file_downloader.download_file(
+                url=file_url,
+                stream=True  # Use streaming for large files
+            )
+            
+            if file_content:
+                return file_content
+            else:
+                print(f"❌ Failed to download file from: {file_url}")
+                return None
+                
         except Exception as e:
             print(f"❌ Error downloading file: {e}")
             return None
@@ -236,12 +294,9 @@ class AIAnalysisProcessor:
         """Get statistics about the processing queue"""
         try:
             # Get queue statistics
-            response = await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self.db.supabase.table("ai_analysis_queue")
-                    .select("status")
+            response = await self.db.supabase.table("ai_analysis_queue") \
+                    .select("status") \
                     .execute()
-            )
             
             queue_items = response.data if response.data else []
             
@@ -273,7 +328,7 @@ async def run_background_processor():
         # Initialize services
         from database import DatabaseManager
         from ai_analysis_service import AIAnalysisService
-        from supabase import create_client
+        from supabase import create_async_client
         
         # Setup Supabase client
         supabase_url = os.getenv("SUPABASE_URL")
@@ -283,7 +338,7 @@ async def run_background_processor():
             print("❌ Missing Supabase credentials")
             return
         
-        supabase = create_client(supabase_url, supabase_key)
+        supabase = await create_async_client(supabase_url, supabase_key)
         db = DatabaseManager(supabase)
         ai_service = AIAnalysisService()
         

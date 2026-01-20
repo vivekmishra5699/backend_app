@@ -1,51 +1,58 @@
 # FastAPI and web framework
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-python-multipart==0.0.6
-jinja2>=3.1.2
-PyJWT==2.8.0
+# UPGRADED: Newer FastAPI is required to support the AnyIO version needed by Google GenAI
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+PyJWT>=2.8.0
+
 # Database and storage
-supabase==2.0.0
-psycopg2-binary==2.9.7
+supabase>=2.5.0
+psycopg2-binary>=2.9.7
 
 # Authentication and security
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
+cryptography>=42.0.0
+python-jose>=3.3.0
+bcrypt==4.0.1
+passlib==1.7.4
 python-decouple==3.8
 
 # HTTP requests and API
-requests==2.31.0
-httpx==0.24.1
+# Relaxed versions to prevent conflicts with Google/Firebase dependencies
+requests>=2.31.0
+httpx[http2]>=0.27.0
+h2>=4.1.0
+hyperframe>=6.0.1
+hpack>=4.0.0
 
 # WhatsApp/SMS (Twilio)
-twilio==8.9.1
+twilio>=8.9.1
 
-# Firebase (for auth tokens)
-firebase-admin==6.2.0
+# Firebase
+firebase-admin>=6.2.0
 
 # Environment and configuration
-python-dotenv==1.0.0
+python-dotenv>=1.0.0
 
 # File handling and utilities
-aiofiles==23.2.1
-typing-extensions==4.8.0
+aiofiles>=23.2.1
+typing-extensions>=4.8.0
 
 # Data validation
-pydantic[email]==2.5.0
+pydantic[email]>=2.5.0
 
 # ASGI server
-gunicorn==21.2.0
+gunicorn>=21.2.0
 
 # PDF generation and manipulation
-reportlab==4.0.7
-PyMuPDF==1.22.5
+reportlab>=4.0.7
+PyMuPDF>=1.22.5
 
 # AI and Document Analysis
-google-generativeai>=0.3.0
+google-genai>=1.52.0
 pillow>=10.0.0
 python-magic>=0.4.27
 PyPDF2>=3.0.0
 
-# Development and testing (optional)
-pytest==7.4.3
-pytest-asyncio==0.21.1
+# Development
+pytest>=7.4.3
+pytest-asyncio>=0.21.1
